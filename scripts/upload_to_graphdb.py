@@ -159,14 +159,7 @@ def extract_prov_from_file(file_path):
         }
 
 def main():
-    if len(sys.argv) != 2:
-        print("Usage: python upload_to_graphdb.py <mei_file_or_directory>")
-        print("\nExamples:")
-        print("  python upload_to_graphdb.py single_file.mei")
-        print("  python upload_to_graphdb.py /path/to/mei/directory")
-        sys.exit(1)
-    
-    input_path = Path(sys.argv[1])
+    input_path = os.environ["INPUT_PATH"]
     
     # Initialize GraphDB uploader
     try:
