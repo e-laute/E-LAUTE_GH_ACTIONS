@@ -11,6 +11,8 @@ on:
     secrets:
       ORG_SECRET:
         required: true
+      TEST_GRAPHDB_URL:
+        required: true
       GRAPHDB_URL:
         required: true
       GRAPHDB_REPOSITORY:
@@ -57,6 +59,7 @@ jobs:
         run: |
           export ORG_SECRET="${{ secrets.ORG_SECRET}}"
           export GRAPHDB_URL="${{ secrets.GRAPHDB_URL}}"
+          export TEST_GRAPHDB_URL="${{ secrets.TEST_GRAPHDB_URL}}"
           export GRAPHDB_REPOSITORY="${{ secrets.GRAPHDB_REPOSITORY}}"
           export GRAPHDB_USERNAME="${{ secrets.GRAPHDB_USERNAME}}"
           export GRAPHDB_PASSWORD="${{ secrets.GRAPHDB_PASSWORD}}"
