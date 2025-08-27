@@ -2,6 +2,9 @@ name: Validate TEI and MEI encodings
 
 on:
   workflow_call:
+    secrets:
+      TEST_SECRET:
+        required: true
     inputs:
       repo-path:
         description: "Relative path to caller repo checkout"
@@ -44,8 +47,8 @@ jobs:
       # 5. Run the shared script *on the caller repo*
       - name: Run shared Python script
         env:
-          ORG_SECRET: ${{ secrets.TEST_SECRET }}
+          TEST_SECRET: ${{ secrets.TEST_SECRET }}
         run: |
           export CALLER_REPO_PATH="${{ github.workspace }}/caller-repo"
-          export SECRET="${{ env.ORG_SECRET }}"
+          export SECRET="${{ env.TEST_SECRET }}"
           python shared-actions/scripts/validate_encodings.py
