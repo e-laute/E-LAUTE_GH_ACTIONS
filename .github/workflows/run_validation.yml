@@ -44,7 +44,7 @@ jobs:
       # 5. Run the shared script *on the caller repo*
       - name: Run shared Python script
         env:
-          TEST_SECRET: ${{ secrets.TEST_SECRET }}
+          TEST_SECRET: ${{ secrets.TEST_REPO_SECRET }}
         run: |
           export CALLER_REPO_PATH="${{ github.workspace }}/caller-repo"
           export SECRET="${{ env.TEST_SECRET }}"
