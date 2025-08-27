@@ -1,4 +1,4 @@
-name: Shared Workflow
+name: Validate TEI and MEI encodings
 
 on:
   workflow_call:
@@ -28,7 +28,7 @@ jobs:
       - name: Checkout shared repository
         uses: actions/checkout@v4
         with:
-          repository: e-laute/E-LAUTE_GH_ACTIONS
+          repository: e-laute/E-LAUTE_GH_Actions
           ref: main
           path: shared-actions
 
