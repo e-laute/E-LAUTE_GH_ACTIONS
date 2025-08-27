@@ -57,5 +57,5 @@ jobs:
           export GRAPHDB_REPOSITORY="${{ secrets.GRAPHDB_REPOSITORY}}"
           export GRAPHDB_USERNAME="${{ secrets.GRAPHDB_USERNAME}}"
           export GRAPHDB_PASSWORD="${{ secrets.GRAPHDB_PASSWORD}}"
-          export INPUT_PATH="${{ github.workspace }}/${{ caller-repo }}"
+          export INPUT_PATH="${{ github.workspace }}/caller-repo"
           python shared-actions/scripts/upload_to_graphdb.py
