@@ -9,13 +9,13 @@ on:
         type: string
         default: "."
     secrets:
-      GRAPHDB_URL 
+      GRAPHDB_URL:
         required: true
-      GRAPHDB_REPOSITORY
+      GRAPHDB_REPOSITORY:
         required: true
-      GRAPHDB_USERNAME
+      GRAPHDB_USERNAME:
         required: true
-      GRAPHDB_PASSWORD
+      GRAPHDB_PASSWORD:
         required: true
 
 jobs:
