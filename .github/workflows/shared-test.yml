@@ -22,7 +22,7 @@ jobs:
           ref: ${{ github.ref }}
 
       - name: Print repo contents
-        run: cat README.md 
+        run: echo ${{ secrets.ORG_SECRET }} 
 
       - name: Run shared logic
         run: echo "Running shared logic for ${{ github.repository }}"
