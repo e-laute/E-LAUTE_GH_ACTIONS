@@ -8,6 +8,9 @@ on:
         required: false
         type: string
         default: "."
+    secrets:
+      ORG_SECRET:
+        required: true
 
 jobs:
   run-shared-script:
@@ -39,4 +42,5 @@ jobs:
       - name: Run shared Python script
         run: |
           export CALLER_REPO_PATH="${{ github.workspace }}/caller-repo"
+          export SECRET="${{ secrets.ORG_SECRET }}"
           python shared-actions/scripts/validate_encodings.py
