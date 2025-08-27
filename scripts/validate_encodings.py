@@ -107,7 +107,9 @@ if __name__ == "__main__":
     if len(sys.argv) != 2:
         print("Usage: python validate_mei.py <directory>")
         sys.exit(1)
-    directory = sys.argv[1]
+    directory = os.environ["CALLER_REPO_PATH"]
+    print("Encodings_dir:", directory)
+    print("Org-secret:", os.environ["SECRET"]
     if not os.path.isdir(directory):
         print(f"The specified path '{directory}' is not a directory.")
         sys.exit(1)
