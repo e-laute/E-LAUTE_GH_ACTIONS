@@ -1,0 +1,28 @@
+name: Shared Workflow
+
+on:
+  workflow_call:
+    inputs:
+      some-input:
+        required: false
+        type: string
+    secrets:
+      ORG_SECRET:
+        required: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          # This ensures we check out the calling repo, not shared-actions
+          ref: ${{ github.ref }}
+
+      - name: Print repo contents
+        run: cat README.md 
+
+      - name: Run shared logic
+        run: echo "Running shared logic for ${{ github.repository }}"
