@@ -12,23 +12,15 @@ import os
 import sys
 import subprocess
 import requests
-import json
-import time
-from datetime import datetime
 from pathlib import Path
-from dotenv import load_dotenv
-
-# Load environment variables
-load_dotenv('graphdb.env')
-
 class GraphDBUploader:
     def __init__(self):
-        self.base_url = os.getenv('GRAPHDB_URL')
-        self.repository = os.getenv('GRAPHDB_REPOSITORY')
-        self.username = os.getenv('GRAPHDB_USERNAME')
-        self.password = os.getenv('GRAPHDB_PASSWORD')
-        self.timeout = int(os.getenv('GRAPHDB_TIMEOUT', 30))
-        self.max_retries = int(os.getenv('GRAPHDB_MAX_RETRIES', 3))
+        self.base_url = os.environ['GRAPHDB_URL']
+        self.repository = os.environ['GRAPHDB_REPOSITORY']
+        self.username = os.environ['GRAPHDB_USERNAME']
+        self.password = os.environ['GRAPHDB_PASSWORD']
+        self.timeout = 30
+        self.max_retries = 3
         
         if not all([self.base_url, self.repository, self.username, self.password]):
             raise ValueError("Missing required GraphDB configuration in graphdb.env file")
