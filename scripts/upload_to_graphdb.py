@@ -159,7 +159,7 @@ def extract_prov_from_file(file_path):
         }
 
 def main():
-    input_path = Path(".")
+    input_path = Path("./caller-repo/")
     
     # Initialize GraphDB uploader
     try:
