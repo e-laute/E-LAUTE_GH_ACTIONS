@@ -159,7 +159,7 @@ def extract_prov_from_file(file_path):
         }
 
 def main():
-    input_path = os.environ["INPUT_PATH"]
+    input_path = "."
     
     # Initialize GraphDB uploader
     try:
