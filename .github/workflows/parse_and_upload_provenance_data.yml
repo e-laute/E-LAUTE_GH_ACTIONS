@@ -9,10 +9,6 @@ on:
         type: string
         default: "."
     secrets:
-      ORG_SECRET:
-        required: true
-      TEST_GRAPHDB_URL:
-        required: true
       GRAPHDB_URL:
         required: true
       GRAPHDB_REPOSITORY:
