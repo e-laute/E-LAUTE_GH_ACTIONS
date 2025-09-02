@@ -134,7 +134,9 @@ def find_mei_files(directory):
 def extract_prov_from_file(file_path):
     """Extract PROV-O RDF from a single MEI file."""
     try:
-        script_path = Path(__file__).resolve().parent / 'shared-actions' / 'parse_provenance_prov.py'
+        # determine the directory our script is running in, and launch anohter script 'parse_provenance_prov.py' within the same directory as a subprocess
+        script_path = Path(__file__).resolve().parent + '/parse_provenance_prov.py'
+
         result = subprocess.run(
             [sys.executable, str(script_path), file_path],
             capture_output=True,
