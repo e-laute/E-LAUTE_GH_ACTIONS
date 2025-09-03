@@ -856,7 +856,7 @@ def update_records_in_RDM(work_ids_to_update, draft_one=False):
     return updated_records, failed_updates
 
 
-def process_work_ids_for_update_or_create():
+def process_elaute_ids_for_update_or_create():
     """
     Check which work_ids already exist in RDM and split accordingly.
     Create new records for new work_ids and update existing ones if metadata changed.
@@ -976,7 +976,7 @@ def main():
 
     draft_one = len(sys.argv) > 1 and "--draft-one" in sys.argv
 
-    new_work_ids, existing_work_ids = process_work_ids_for_update_or_create()
+    new_work_ids, existing_work_ids = process_elaute_ids_for_update_or_create()
 
     if len(new_work_ids) > 0:
         upload_mei_files(new_work_ids, draft_one)
