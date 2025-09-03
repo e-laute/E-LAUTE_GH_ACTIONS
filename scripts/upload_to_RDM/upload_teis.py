@@ -9,19 +9,23 @@ from lxml import etree
 
 import json
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
-
-# TODO: Configure environement variables so they can be accessed in github
-
-
 # TODO: where and how to fetch the files from?
 # - gitlab repo? (then I need credentials from there as well, I think)
 
 
-TEI_FILES_PATH = "files"
+import rdm_upload_utils
+
+
+(
+    RDM_API_URL,
+    RDM_API_TOKEN,
+    FILES_PATH,
+    ELAUTE_COMMUNITY_ID,
+    MAPPING_FILE,
+    URL_LIST_FILE,
+) = rdm_upload_utils.setup_for_rdm_api_access(TESTING_MODE=True, GA_MODE=False)
+
+# TODO: remove this and change the logic so that all files from the FILE_PATH are taken
 sources_table = pd.read_csv("tables/filepath_id_lookup.csv")
 sources_info_lookup_df = pd.read_excel("tables/sources_table.xlsx")
 
@@ -40,93 +44,6 @@ sources_table = (
 sources_table = (
     merged.drop(columns=["ID"]) if "ID" in merged.columns else merged
 )
-
-
-# Configuration based on TESTING_MODE
-TESTING_MODE = True  # Set to False for production
-
-
-def get_id_from_api(url):
-    """Get community ID from API URL with error handling"""
-    try:
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-        return response.json().get("id")
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching community ID from {url}: {e}")
-        return None
-
-
-if TESTING_MODE:
-    print("🧪 Running in TESTING mode")
-    RDM_TOKEN = os.getenv("RDM_TEST_API_TOKEN")
-    RDM_API_URL = "https://test.researchdata.tuwien.ac.at/api"
-    MAPPING_FILE = "source_id_record_id_mapping_TESTING.csv"
-    URL_LIST_FILE = "url_list_TESTING.csv"
-
-    ELAUTE_COMMUNITY_ID = get_id_from_api(
-        "https://test.researchdata.tuwien.ac.at/api/communities/e-laute-test"
-    )
-else:
-    print("🚀 Running in PRODUCTION mode")
-    RDM_TOKEN = os.getenv("RDM_API_TOKEN")
-    RDM_API_URL = "https://researchdata.tuwien.ac.at/api"
-    MAPPING_FILE = "source_id_record_id_mapping.csv"
-    URL_LIST_FILE = "url_list.csv"
-
-    ELAUTE_COMMUNITY_ID = get_id_from_api(
-        "https://researchdata.tuwien.ac.at/api/communities/e-laute"
-    )
-
-# see Stackoverflow: https://stackoverflow.com/a/66593457
-# needs to be passed in the GitHub Action
-# - name: Test env vars for python
-#     run: TEST_SECRET=${{ secrets.MY_TOKEN }} python -c 'import os;print(os.environ['TEST_SECRET'])
-
-# RDM_API_URL = os.environ["RDM_API_URL"]
-# RDM_API_TOKEN = os.environ["RDM_API_TOKEN"]
-
-
-# Utility: make HTML link
-def make_html_link(url):
-    return f'<a href="{url}" target="_blank">{url}</a>'
-
-
-# Utility: look up source title (stub, replace with actual lookup if needed)
-def look_up_source_title(source_id):
-    # This should look up the title from a table or database; placeholder:
-    title_series = sources_table.loc[
-        sources_table["source_id"] == source_id, "Title"
-    ]
-    if not title_series.empty:
-        return title_series.values[0]
-    return None
-
-
-# Utility: look up source links (stub, replace with actual lookup if needed)
-def look_up_source_links(source_id):
-    source_link = sources_table.loc[
-        sources_table["source_id"] == source_id,
-        "Source_link",
-    ].values[0]
-    rism = sources_table.loc[
-        sources_table["source_id"] == source_id,
-        "RISM_link",
-    ].values[0]
-    vd16 = sources_table.loc[
-        sources_table["source_id"] == source_id,
-        "VD_16",
-    ].values[0]
-
-    links = []
-    if source_link:
-        links.append(source_link)
-    if rism:
-        links.append(rism)
-    if vd16:
-        links.append(vd16)
-
-    return links
 
 
 def extract_title_versions(title_elem, ns):
@@ -357,17 +274,21 @@ def get_metadata_df_from_tei(tei_file_path):
 
 
 def create_description(row):
-    links = look_up_source_links(row["source_id"])
+    links = rdm_upload_utils.look_up_source_links(
+        sources_table, row["source_id"]
+    )
     valid_links = [
         link
         for link in links
         if link is not None and link == link and str(link).strip() != ""
     ]
-    links_stringified = ", ".join(make_html_link(link) for link in valid_links)
+    links_stringified = ", ".join(
+        rdm_upload_utils.make_html_link(link) for link in valid_links
+    )
 
     # links_stringified = ", ".join(look_up_source_links(row["source_id"]))
     source_id = row["source_id"]
-    platform_link = make_html_link(
+    platform_link = rdm_upload_utils.make_html_link(
         f"https://edition.onb.ac.at/fedora/objects/o:lau.{source_id}/methods/sdef:TEI/get"
     )
 
@@ -378,36 +299,16 @@ def create_description(row):
     else:
         add_titles = f'"{title}"'
 
-    part1 = f" <h1>Transcription in TEI of a source from the E-LAUTE project</h1><h2>Overview</h2><p>This dataset contains the transcription of the source {add_titles}, a 16th century lute tablature source, created as part of the E-LAUTE project (<a href=\"https://e-laute.info/\">https://e-laute.info/</a>). The transcription preserves and makes historical lute music and instructions from the German-speaking regions during 1450-1550 accessible.</p><p>The transcription is based on the work with the title \"{row['title']}\" and the id \"{row['source_id']}\" in the e-lautedb.</p>"
+    part1 = f" <h1>Transcription in TEI of a source from the E-LAUTE project</h1><h2>Overview</h2><p>This dataset contains the transcription of the source {add_titles}, a 16th century lute tablature source, created as part of the E-LAUTE project ({rdm_upload_utils.make_html_link('https://e-laute.info/')}). The transcription preserves and makes historical lute music and instructions from the German-speaking regions during 1450-1550 accessible.</p><p>The transcription is based on the work with the title \"{row['title']}\" and the id \"{row['source_id']}\" in the e-lautedb.</p>"
 
     part4 = f"<p>Images of the original source and renderings of the transcriptions can be found on the E-LAUTE platform: {platform_link}.</p>"
 
     if links_stringified not in [None, ""]:
         part2 = f"<p>Links to the source in other libraries: {links_stringified}.</p>"
 
-    part3 = '<h2>Dataset Contents</h2><p>This dataset consists of one tei-file that contains the transcription of the original source.</p><h2>About the E-LAUTE Project</h2><p><strong>E-LAUTE: Electronic Linked Annotated Unified Tablature Edition - The Lute in the German-Speaking Area 1450-1550</strong></p><p>The E-LAUTE project creates innovative digital editions of lute tablatures from the German-speaking area between 1450 and 1550. This interdisciplinary "open knowledge platform" combines musicology, music practice, music informatics, and literary studies to transform traditional editions into collaborative research spaces.</p><p>For more information, visit the project website: <a href="https://e-laute.info/">https://e-laute.info/</a></p>'
+    part3 = f'<h2>Dataset Contents</h2><p>This dataset consists of one tei-file that contains the transcription of the original source.</p><h2>About the E-LAUTE Project</h2><p><strong>E-LAUTE: Electronic Linked Annotated Unified Tablature Edition - The Lute in the German-Speaking Area 1450-1550</strong></p><p>The E-LAUTE project creates innovative digital editions of lute tablatures from the German-speaking area between 1450 and 1550. This interdisciplinary "open knowledge platform" combines musicology, music practice, music informatics, and literary studies to transform traditional editions into collaborative research spaces.</p><p>For more information, visit the project website: {rdm_upload_utils.make_html_link("https://e-laute.info/")}</p>'
 
     return part1 + part4 + part2 + part3
-
-
-def create_related_identifiers(links):
-    related_identifiers = []
-    for link in links:
-        related_identifiers.append(
-            {
-                "identifier": link,
-                "relation_type": {
-                    "id": "ispartof",
-                    "title": {"en": "Is part of"},
-                },
-                "resource_type": {
-                    "id": "other",
-                    "title": {"de": "Anderes", "en": "Other"},
-                },
-                "scheme": "url",
-            },
-        )
-    return related_identifiers
 
 
 def fill_out_basic_metadata(metadata_row, people_df, corporate_df):
@@ -615,7 +516,7 @@ def fill_out_basic_metadata(metadata_row, people_df, corporate_df):
             metadata["metadata"]["contributors"].append(person_entry)
 
     # Add source links as related identifiers
-    links_to_source = look_up_source_links(row["source_id"])
+    links_to_source = rdm_upload_utils.look_up_source_links(row["source_id"])
     # Filter out empty, None, or NaN links
     links_to_source = [
         link
@@ -624,7 +525,7 @@ def fill_out_basic_metadata(metadata_row, people_df, corporate_df):
     ]
     if links_to_source:
         metadata["metadata"]["related_identifiers"].extend(
-            create_related_identifiers(links_to_source)
+            rdm_upload_utils.create_related_identifiers(links_to_source)
         )
 
     return metadata
@@ -644,12 +545,12 @@ def update_records_in_RDM(source_ids_to_update):
     h = {
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {RDM_TOKEN}",
+        "Authorization": f"Bearer {RDM_API_TOKEN}",
     }
     fh = {
         "Accept": "application/json",
         "Content-Type": "application/octet-stream",
-        "Authorization": f"Bearer {RDM_TOKEN}",
+        "Authorization": f"Bearer {RDM_API_TOKEN}",
     }
 
     mapping_file = MAPPING_FILE
@@ -1022,13 +923,13 @@ def upload_tei_files(test_one=False, test_all=False):
     h = {
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {RDM_TOKEN}",
+        "Authorization": f"Bearer {RDM_API_TOKEN}",
     }
 
     fh = {
         "Accept": "application/json",
         "Content-Type": "application/octet-stream",
-        "Authorization": f"Bearer {RDM_TOKEN}",
+        "Authorization": f"Bearer {RDM_API_TOKEN}",
     }
 
     api_url = f"{RDM_API_URL}/records"
@@ -1277,7 +1178,7 @@ def create_url_list():
     h = {
         "Accept": "application/json",
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {RDM_TOKEN}",
+        "Authorization": f"Bearer {RDM_API_TOKEN}",
     }
 
     self_html_list = []

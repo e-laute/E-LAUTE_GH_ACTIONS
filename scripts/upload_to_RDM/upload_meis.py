@@ -3,8 +3,6 @@ import os
 import sys
 from lxml import etree
 
-from pathlib import Path
-
 import requests
 import json
 
@@ -12,81 +10,19 @@ import re
 
 from datetime import datetime
 
-from dotenv import load_dotenv
 
-load_dotenv()
-
-
-# Configuration based on TESTING_MODE
-TESTING_MODE = True  # Set to False for production
-GA_MODE = False
+import rdm_upload_utils
 
 
-def get_id_from_api(url):
-    """Get community ID from API URL with error handling"""
-    try:
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-        return response.json().get("id")
-    except requests.exceptions.RequestException as e:
-        print(f"Error fetching community ID from {url}: {e}")
-        return None
+(
+    RDM_API_URL,
+    RDM_API_TOKEN,
+    FILES_PATH,
+    ELAUTE_COMMUNITY_ID,
+    MAPPING_FILE,
+    URL_LIST_FILE,
+) = rdm_upload_utils.setup_for_rdm_api_access(TESTING_MODE=True, GA_MODE=False)
 
-
-if TESTING_MODE:
-    RDM_API_URL = "https://test.researchdata.tuwien.ac.at/api"
-    MAPPING_FILE = "work_id_record_id_mapping_TESTING.csv"
-    URL_LIST_FILE = "url_list_TESTING.csv"
-
-    ELAUTE_COMMUNITY_ID = get_id_from_api(
-        f"{RDM_API_URL}/communities/e-laute-test"
-    )
-    if GA_MODE:
-        print("🧪 Running in GitHubActions TESTING mode")
-        RDM_API_TOKEN = os.environ["RDM_API_TEST_TOKEN_JJ"]
-    else:
-        print("🧪 Running in local TESTING mode")
-        RDM_API_TOKEN = os.getenv("RDM_TEST_API_TOKEN")
-
-else:
-    RDM_API_URL = "https://researchdata.tuwien.ac.at/api"
-    MAPPING_FILE = "work_id_record_id_mapping.csv"
-    URL_LIST_FILE = "url_list.csv"
-    ELAUTE_COMMUNITY_ID = get_id_from_api(f"{RDM_API_URL}/communities/e-laute")
-
-    if GA_MODE:
-        print(" 🚀 Running in GitHubActions PRODUCTION mode")
-        RDM_API_TOKEN = os.environ["RDM_API_TOKEN_JJ"]
-
-    else:
-        print("🚀 Running in local PRODUCTION mode")
-        RDM_API_TOKEN = os.getenv("RDM_API_TOKEN")
-
-
-# see Stackoverflow: https://stackoverflow.com/a/66593457
-# needs to be passed in the GitHub Action
-# - name: Test env vars for python
-#     run: TEST_SECRET=${{ secrets.MY_TOKEN }} python -c 'import os;print(os.environ['TEST_SECRET'])
-
-# RDM_API_URL = os.environ["RDM_API_URL"]
-# RDM_API_TOKEN = os.environ["RDM_API_TOKEN"]
-
-print(f"Using mapping file: {MAPPING_FILE}")
-print(f"Using URL list file: {URL_LIST_FILE}")
-print(f"Using API URL: {RDM_API_URL}")
-if ELAUTE_COMMUNITY_ID:
-    print(f"Community ID: {ELAUTE_COMMUNITY_ID}")
-else:
-    print("Warning: Could not fetch community ID")
-
-
-if GA_MODE:
-    # this is equal to the home dir in the sources repository (so where the files that should be uploaded are located)
-    MEI_FILES_PATH = input_path = Path("./caller-repo/")
-else:
-    MEI_FILES_PATH = "files"
-    # TODO: adapt to accomodate reality in git repos
-    # get the name of the repo and its subfolders and go over each of them
 
 errors = []
 metadata_df = pd.DataFrame()
@@ -101,42 +37,6 @@ sources_table["source_name"] = sources_excel_df["Title"]
 sources_table["source_link"] = sources_excel_df["Source_link"].fillna("")
 sources_table["RISM_link"] = sources_excel_df["RISM_link"].fillna("")
 sources_table["VD_16"] = sources_excel_df["VD_16"].fillna("")
-
-
-def look_up_source_title(source_id):
-    return sources_table.loc[
-        sources_table["source_id"] == source_id,
-        "source_name",
-    ].values[0]
-
-
-def make_html_link(url):
-    return f'<a href="{url}" target="_blank">{url}</a>'
-
-
-def look_up_source_links(source_id):
-    source_link = sources_table.loc[
-        sources_table["source_id"] == source_id,
-        "source_link",
-    ].values[0]
-    rism = sources_table.loc[
-        sources_table["source_id"] == source_id,
-        "RISM_link",
-    ].values[0]
-    vd16 = sources_table.loc[
-        sources_table["source_id"] == source_id,
-        "VD_16",
-    ].values[0]
-
-    links = []
-    if source_link:
-        links.append(source_link)
-    if rism:
-        links.append(rism)
-    if vd16:
-        links.append(vd16)
-
-    return links
 
 
 def get_metadata_df_from_mei(mei_file_path):
@@ -360,35 +260,15 @@ def get_metadata_df_from_mei(mei_file_path):
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 
-def create_related_identifiers(links):
-    related_identifiers = []
-    for link in links:
-        related_identifiers.append(
-            {
-                "identifier": link,
-                "relation_type": {
-                    "id": "ispartof",
-                    "title": {"en": "Is part of"},
-                },
-                "resource_type": {
-                    "id": "other",
-                    "title": {"de": "Anderes", "en": "Other"},
-                },
-                "scheme": "url",
-            },
-        )
-    return related_identifiers
-
-
 def get_work_ids_from_files():
     """
-    Scan all folders in MEI_FILES_PATH and extract unique work_ids.
+    Scan all folders in FILES_PATH and extract unique work_ids.
     Extract everything up to and including the 'n' + number part.
     Example: Jud_1523-2_n10_18v_enc_dipl_GLT.mei -> Jud_1523-2_n10
     """
     work_ids = set()
 
-    for root, dirs, files in os.walk(MEI_FILES_PATH):
+    for root, dirs, files in os.walk(FILES_PATH):
         for file in files:
             if file.endswith(".mei"):
                 # Remove .mei extension
@@ -420,7 +300,7 @@ def get_files_for_work_id(work_id):
 
     matching_files = []
 
-    for root, dirs, files in os.walk(MEI_FILES_PATH):
+    for root, dirs, files in os.walk(FILES_PATH):
         for file in files:
             if file.endswith(".mei"):
                 base_name = file.replace(".mei", "")
@@ -544,17 +424,19 @@ def create_description_for_work(row, file_count):
     Create description for a work with multiple files.
     """
     links_stringified = ""
-    links = look_up_source_links(row["source_id"])
+    links = rdm_upload_utils.look_up_source_links(
+        sources_table, row["source_id"]
+    )
     for link in links if links else []:
-        links_stringified += make_html_link(link) + ", "
+        links_stringified += rdm_upload_utils.make_html_link(link) + ", "
 
     source_id = row["source_id"]
     work_number = row["work_id"].split("_")[-1]
-    platform_link = make_html_link(
+    platform_link = rdm_upload_utils.make_html_link(
         f"https://edition.onb.ac.at/fedora/objects/o:lau.{source_id}/methods/sdef:TEI/get?mode={work_number}"
     )
 
-    part1 = f"<h1>Transcriptions in MEI of a lute piece from the E-LAUTE project</h1><h2>Overview</h2><p>This dataset contains transcription files of the piece \"{row['title']}\", a 16th century lute music piece originally notated in lute tablature, created as part of the E-LAUTE project (<a href=\"https://e-laute.info/\">https://e-laute.info/</a>). The transcriptions preserve and make historical lute music from the German-speaking regions during 1450-1550 accessible.</p><p>They are based on the work with the title \"{row['title']}\" and the id \"{row['work_id']}\" in the e-lautedb. It is found on the page(s) or folio(s) {row['fol_or_p']} in the source \"{look_up_source_title(row['source_id'])}\" with the E-LAUTE source-id \"{row['source_id']}\" and the shelfmark {row['shelfmark']}.</p>"
+    part1 = f"<h1>Transcriptions in MEI of a lute piece from the E-LAUTE project</h1><h2>Overview</h2><p>This dataset contains transcription files of the piece \"{row['title']}\", a 16th century lute music piece originally notated in lute tablature, created as part of the E-LAUTE project ({rdm_upload_utils.make_html_link('https://e-laute.info/')}). The transcriptions preserve and make historical lute music from the German-speaking regions during 1450-1550 accessible.</p><p>They are based on the work with the title \"{row['title']}\" and the id \"{row['work_id']}\" in the e-lautedb. It is found on the page(s) or folio(s) {row['fol_or_p']} in the source \"{rdm_upload_utils.look_up_source_title(sources_table, row['source_id'])}\" with the E-LAUTE source-id \"{row['source_id']}\" and the shelfmark {row['shelfmark']}.</p>"
 
     part4 = f"<p>Images of the original source and renderings of the transcriptions can be found on the E-LAUTE platform: {platform_link}.</p>"
 
@@ -563,7 +445,7 @@ def create_description_for_work(row, file_count):
     else:
         part2 = ""
 
-    part3 = f'<h2>Dataset Contents</h2><p>This dataset includes {file_count} MEI files with different transcription variants (diplomatic/editorial versions in various tablature notations and common music notation).</p><h2>About the E-LAUTE Project</h2><p><strong>E-LAUTE: Electronic Linked Annotated Unified Tablature Edition - The Lute in the German-Speaking Area 1450-1550</strong></p><p>The E-LAUTE project creates innovative digital editions of lute tablatures from the German-speaking area between 1450 and 1550. This interdisciplinary "open knowledge platform" combines musicology, music practice, music informatics, and literary studies to transform traditional editions into collaborative research spaces.</p><p>For more information, visit the project website: <a href="https://e-laute.info/">https://e-laute.info/</a></p>'
+    part3 = f'<h2>Dataset Contents</h2><p>This dataset includes {file_count} MEI files with different transcription variants (diplomatic/editorial versions in various tablature notations and common music notation).</p><h2>About the E-LAUTE Project</h2><p><strong>E-LAUTE: Electronic Linked Annotated Unified Tablature Edition - The Lute in the German-Speaking Area 1450-1550</strong></p><p>The E-LAUTE project creates innovative digital editions of lute tablatures from the German-speaking area between 1450 and 1550. This interdisciplinary "open knowledge platform" combines musicology, music practice, music informatics, and literary studies to transform traditional editions into collaborative research spaces.</p><p>For more information, visit the project website: {rdm_upload_utils.make_html_link('https://e-laute.info/')}</p>'
 
     return part1 + part4 + part2 + part3
 
@@ -699,10 +581,12 @@ def fill_out_basic_metadata_for_work(
                 contributor_names.add(person_role_key)
 
     # Add source links as related identifiers
-    links_to_source = look_up_source_links(row["source_id"])
+    links_to_source = rdm_upload_utils.look_up_source_links(
+        sources_table, row["source_id"]
+    )
     if links_to_source:
         metadata["metadata"]["related_identifiers"].extend(
-            create_related_identifiers(links_to_source)
+            rdm_upload_utils.create_related_identifiers(links_to_source)
         )
 
     return metadata
