@@ -4,14 +4,13 @@ import sys
 from lxml import etree
 
 import requests
-import json
 
 import re
 
 from datetime import datetime
 
 
-import rdm_upload_utils
+from . import rdm_upload_utils
 
 
 (
@@ -19,22 +18,22 @@ import rdm_upload_utils
     RDM_API_TOKEN,
     FILES_PATH,
     ELAUTE_COMMUNITY_ID,
-    MAPPING_FILE,
-    URL_LIST_FILE,
 ) = rdm_upload_utils.setup_for_rdm_api_access(TESTING_MODE=True, GA_MODE=False)
 
 
 errors = []
 metadata_df = pd.DataFrame()
+sources_table = pd.DataFrame()
 
 # TODO: implement extraction of info about sources from knowledge graph/dbrepo and not from exel-file
-sources_excel_df = pd.read_excel("tables/sources_table.xlsx")
-sources_table = pd.DataFrame()
+sources_excel_df = pd.read_excel(
+    "scripts/upload_to_RDM/tables/sources_table.xlsx"
+)
 sources_table["source_id"] = sources_excel_df["ID"].fillna(
     sources_excel_df["Shelfmark"]
 )
-sources_table["source_name"] = sources_excel_df["Title"]
-sources_table["source_link"] = sources_excel_df["Source_link"].fillna("")
+sources_table["Title"] = sources_excel_df["Title"]
+sources_table["Source_link"] = sources_excel_df["Source_link"].fillna("")
 sources_table["RISM_link"] = sources_excel_df["RISM_link"].fillna("")
 sources_table["VD_16"] = sources_excel_df["VD_16"].fillna("")
 
@@ -268,6 +267,8 @@ def get_work_ids_from_files():
     """
     work_ids = set()
 
+    print(FILES_PATH)
+
     for root, dirs, files in os.walk(FILES_PATH):
         for file in files:
             if file.endswith(".mei"):
@@ -464,6 +465,9 @@ def fill_out_basic_metadata_for_work(
             "creators": [],
             "contributors": [],
             "description": create_description_for_work(row, file_count),
+            "identifiers": [
+                {"identifier": f"{row['work_id']}", "scheme": "other"}
+            ],
             "publication_date": datetime.today().strftime("%Y-%m-%d"),
             "dates": [
                 {
@@ -541,9 +545,32 @@ def fill_out_basic_metadata_for_work(
             metadata["metadata"]["creators"].append(person_entry)
             creator_names.add(person.get("full_name", ""))
 
-    # Third pass: Add all other roles as contributors
+    # Third pass: Add meiEditors and fronimoEditors as creators
     for _, person in people_df.iterrows():
-        if person.get("role") not in ["author", "intabulator"]:
+        if (
+            person.get("role") in ["meiEditor", "fronimoEditor"]
+            and person.get("full_name", "") not in creator_names
+        ):
+            person_entry = {
+                "person_or_org": {
+                    "family_name": person.get("last_name", ""),
+                    "given_name": person.get("first_name", ""),
+                    "name": person.get("full_name", ""),
+                    "type": "personal",
+                }
+            }
+            person_entry["role"] = {"id": "editor", "title": {"en": "Editor"}}
+            metadata["metadata"]["creators"].append(person_entry)
+            creator_names.add(person.get("full_name", ""))
+
+    # Fourth pass: Add all other roles as contributors (excluding those already added as creators)
+    for _, person in people_df.iterrows():
+        if person.get("role") not in [
+            "author",
+            "intabulator",
+            "meiEditor",
+            "fronimoEditor",
+        ]:
             # Create a unique key for this person-role combination
             person_role_key = (
                 f"{person.get('full_name', '')}-{person.get('role', '')}"
@@ -560,11 +587,6 @@ def fill_out_basic_metadata_for_work(
                 }
 
                 role_mapping = {
-                    "meiEditor": {"id": "editor", "title": {"en": "Editor"}},
-                    "fronimoEditor": {
-                        "id": "editor",
-                        "title": {"en": "Editor"},
-                    },
                     "metadataContact": {
                         "id": "contactperson",
                         "title": {"en": "Contact person"},
@@ -592,32 +614,18 @@ def fill_out_basic_metadata_for_work(
     return metadata
 
 
-def update_records_in_RDM(work_ids_to_update):
+def update_records_in_RDM(work_ids_to_update, draft_one=False):
     """Update existing records in RDM if metadata has changed."""
 
     # HTTP Headers
-    h = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {RDM_API_TOKEN}",
-    }
-
-    fh = {
-        "Accept": "application/json",
-        "Content-Type": "application/octet-stream",
-        "Authorization": f"Bearer {RDM_API_TOKEN}",
-    }
-
-    api_url = f"{RDM_API_URL}/records"
+    h, fh = rdm_upload_utils.set_headers(RDM_API_TOKEN)
 
     # Load existing work_id to record_id mapping
-    mapping_file = MAPPING_FILE
-    if not os.path.exists(mapping_file):
-        print(f"Mapping file {mapping_file} not found. No records to update.")
-        return
+    existing_records = rdm_upload_utils.get_records_from_RDM(
+        RDM_API_TOKEN, RDM_API_URL, ELAUTE_COMMUNITY_ID
+    )
 
-    existing_mapping = pd.read_csv(mapping_file, sep=";")
-    current_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # current_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     updated_records = []
     failed_updates = []
 
@@ -625,7 +633,7 @@ def update_records_in_RDM(work_ids_to_update):
         print(f"\n--- Checking for updates: {work_id} ---")
 
         # Check if work_id exists in mapping
-        mapping_row = existing_mapping[existing_mapping["work_id"] == work_id]
+        mapping_row = existing_records[existing_records["elaute_id"] == work_id]
         if mapping_row.empty:
             print(f"Work ID {work_id} not found in existing records. Skipping.")
             continue
@@ -654,7 +662,7 @@ def update_records_in_RDM(work_ids_to_update):
             new_metadata = new_metadata_structure["metadata"]
 
             # Fetch current record metadata from RDM
-            r = requests.get(f"{api_url}/{record_id}", headers=h)
+            r = requests.get(f"{RDM_API_URL}/records/{record_id}", headers=h)
             if r.status_code != 200:
                 print(
                     f"Failed to fetch record {record_id} (code: {r.status_code})"
@@ -671,6 +679,7 @@ def update_records_in_RDM(work_ids_to_update):
                 "creators",
                 "contributors",
                 "description",
+                "identifiers",
                 "dates",
                 "publisher",
                 "references",
@@ -678,122 +687,6 @@ def update_records_in_RDM(work_ids_to_update):
                 "resource_type",
                 "rights",
             ]
-
-            def normalize_for_comparison(obj):
-                """Normalize data structures for more reliable comparison"""
-                if obj is None:
-                    return None
-                elif isinstance(obj, str):
-                    normalized = obj.strip()
-                    return None if normalized == "" else normalized
-                elif isinstance(obj, list):
-                    normalized_items = []
-                    for item in obj:
-                        if item is not None:
-                            normalized_item = normalize_for_comparison(item)
-                            if normalized_item is not None:
-                                normalized_items.append(normalized_item)
-
-                    try:
-                        return sorted(
-                            normalized_items,
-                            key=lambda x: (
-                                json.dumps(x, sort_keys=True)
-                                if isinstance(x, dict)
-                                else str(x)
-                            ),
-                        )
-                    except (TypeError, ValueError):
-                        return normalized_items
-                elif isinstance(obj, dict):
-                    normalized_dict = {}
-                    for k, v in obj.items():
-                        normalized_value = normalize_for_comparison(v)
-                        if normalized_value is not None:
-                            normalized_dict[k] = normalized_value
-                    return normalized_dict if normalized_dict else None
-                else:
-                    return obj
-
-            def deep_compare_metadata(current_value, new_value):
-                """Compare two metadata values with normalization"""
-                normalized_current = normalize_for_comparison(current_value)
-                normalized_new = normalize_for_comparison(new_value)
-
-                if normalized_current is None and normalized_new is None:
-                    return True
-                if normalized_current is None or normalized_new is None:
-                    return False
-
-                if isinstance(normalized_current, dict) and isinstance(
-                    normalized_new, dict
-                ):
-                    try:
-                        current_json = json.dumps(
-                            normalized_current,
-                            sort_keys=True,
-                            separators=(",", ":"),
-                        )
-                        new_json = json.dumps(
-                            normalized_new,
-                            sort_keys=True,
-                            separators=(",", ":"),
-                        )
-                        return current_json == new_json
-                    except (TypeError, ValueError):
-                        if set(normalized_current.keys()) != set(
-                            normalized_new.keys()
-                        ):
-                            return False
-                        for key in normalized_current.keys():
-                            if not deep_compare_metadata(
-                                normalized_current[key], normalized_new[key]
-                            ):
-                                return False
-                        return True
-
-                if isinstance(normalized_current, list) and isinstance(
-                    normalized_new, list
-                ):
-                    current_set = set()
-                    new_set = set()
-
-                    for item in normalized_current:
-                        try:
-                            item_str = (
-                                json.dumps(item, sort_keys=True)
-                                if isinstance(item, dict)
-                                else str(item)
-                            )
-                            current_set.add(item_str)
-                        except (TypeError, ValueError):
-                            current_set.add(str(item))
-
-                    for item in normalized_new:
-                        try:
-                            item_str = (
-                                json.dumps(item, sort_keys=True)
-                                if isinstance(item, dict)
-                                else str(item)
-                            )
-                            new_set.add(item_str)
-                        except (TypeError, ValueError):
-                            new_set.add(str(item))
-
-                    return current_set == new_set
-
-                try:
-                    current_json = json.dumps(
-                        normalized_current,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
-                    new_json = json.dumps(
-                        normalized_new, sort_keys=True, separators=(",", ":")
-                    )
-                    return current_json == new_json
-                except (TypeError, ValueError):
-                    return normalized_current == normalized_new
 
             # Check for metadata changes
             metadata_changed = False
@@ -803,7 +696,9 @@ def update_records_in_RDM(work_ids_to_update):
                 current_value = current_metadata.get(field)
                 new_value = new_metadata.get(field)
 
-                if not deep_compare_metadata(current_value, new_value):
+                if not rdm_upload_utils.deep_compare_metadata(
+                    current_value, new_value
+                ):
                     metadata_changed = True
                     changes_detected.append(field)
 
@@ -814,134 +709,133 @@ def update_records_in_RDM(work_ids_to_update):
                 f"Metadata changes detected for work_id {work_id} in fields: {', '.join(changes_detected)}"
             )
 
-            # Create a new version/draft for the record
-            r = requests.post(f"{api_url}/{record_id}/versions", headers=h)
-            if r.status_code != 201:
-                print(
-                    f"Failed to create new version for record {record_id} (code: {r.status_code})"
-                )
-                failed_updates.append(work_id)
-                continue
+            # --- UPLOAD ---
 
-            new_version_data = r.json()
-            new_record_id = new_version_data["id"]
-
-            # Update the draft with new metadata
-            r = requests.put(
-                f"{api_url}/{new_record_id}/draft",
-                data=json.dumps(new_metadata_structure),
-                headers=h,
+            fails = rdm_upload_utils.upload_v2(
+                metadata=new_metadata,
+                elaute_id=work_id,
+                file_paths=file_paths,
+                RDM_API_TOKEN=RDM_API_TOKEN,
+                RDM_API_URL=RDM_API_URL,
+                ELAUTE_COMMUNITY_ID=ELAUTE_COMMUNITY_ID,
+                draft_one=draft_one,
             )
-            if r.status_code != 200:
-                print(
-                    f"Failed to update draft {new_record_id} (code: {r.status_code})"
-                )
-                failed_updates.append(work_id)
-                continue
-
-            # Update files - delete existing and upload new ones
-            r = requests.delete(
-                f"{api_url}/{new_record_id}/draft/files", headers=h
-            )
-
-            # Upload files
-            file_entries = []
-            for file_path in file_paths:
-                file_entries.append({"key": os.path.basename(file_path)})
-
-            # Initialize files
-            data = json.dumps(file_entries)
-            r = requests.post(
-                f"{api_url}/{new_record_id}/draft/files",
-                data=data,
-                headers=h,
-            )
-            if r.status_code != 201:
-                print(
-                    f"Failed to initialize files for record {new_record_id} (code: {r.status_code})"
-                )
-                failed_updates.append(work_id)
-                continue
-
-            file_responses = r.json()["entries"]
-
-            # Upload each file
-            for i, file_path in enumerate(file_paths):
-                file_links = file_responses[i]["links"]
-
-                # Upload file content
-                with open(file_path, "rb") as fp:
-                    r = requests.put(file_links["content"], data=fp, headers=fh)
-                if r.status_code != 200:
-                    continue
-
-                # Commit the file
-                r = requests.post(file_links["commit"], headers=h)
-                if r.status_code != 200:
-                    continue
-
-            # Add to E-LAUTE community
-            if ELAUTE_COMMUNITY_ID:
-                r = requests.put(
-                    f"{api_url}/{new_record_id}/draft/review",
-                    headers=h,
-                    data=json.dumps(
-                        {
-                            "receiver": {"community": ELAUTE_COMMUNITY_ID},
-                            "type": "community-submission",
-                        }
-                    ),
-                )
-
-            # Submit the review for the record draft
-            r = requests.post(
-                f"{api_url}/{record_id}/draft/actions/submit-review",
-                headers=h,
-            )
-            if not r.status_code == 202:
-                print(
-                    f"Failed to submit review for record {record_id} (code: {r.status_code})"
-                )
-                failed_updates.append(work_id)
-
-            # Update mapping with new record ID and timestamp
-            updated_records.append(
-                {
-                    "work_id": work_id,
-                    "record_id": new_record_id,
-                    "file_count": len(file_paths),
-                    "created": mapping_row.iloc[0][
-                        "created"
-                    ],  # Keep original timestamp
-                    "updated": current_timestamp,
-                }
-            )
-
-            print(
-                f"Successfully updated record for work_id {work_id}: {new_record_id}"
-            )
+            failed_updates.extend(fails)
 
         except Exception as e:
-            print(f"Error updating record for work_id {work_id}: {str(e)}")
-            failed_updates.append(work_id)
-            continue
+            print(f"Error uploading files for work_id {work_id}: {e}")
 
-    # Update mapping file with new record IDs
-    if updated_records:
-        updated_df = pd.DataFrame(updated_records)
+        #     # Create a new version/draft for the record
+        #     r = requests.post(f"{api_url}/{record_id}/versions", headers=h)
+        #     if r.status_code != 201:
+        #         print(
+        #             f"Failed to create new version for record {record_id} (code: {r.status_code})"
+        #         )
+        #         failed_updates.append(work_id)
+        #         continue
 
-        # Update existing mapping file by replacing old entries
-        for _, updated_row in updated_df.iterrows():
-            work_id = updated_row["work_id"]
-            existing_mapping.loc[
-                existing_mapping["work_id"] == work_id, ["record_id", "updated"]
-            ] = [updated_row["record_id"], updated_row["updated"]]
+        #     new_version_data = r.json()
+        #     new_record_id = new_version_data["id"]
 
-        # Save updated mapping
-        existing_mapping.to_csv(mapping_file, index=False, sep=";")
-        print(
-            f"Updated mapping file with {len(updated_records)} updated records"
-        )
+        #     # Update the draft with new metadata
+        #     r = requests.put(
+        #         f"{api_url}/{new_record_id}/draft",
+        #         data=json.dumps(new_metadata_structure),
+        #         headers=h,
+        #     )
+        #     if r.status_code != 200:
+        #         print(
+        #             f"Failed to update draft {new_record_id} (code: {r.status_code})"
+        #         )
+        #         failed_updates.append(work_id)
+        #         continue
+
+        #     # Update files - delete existing and upload new ones
+        #     r = requests.delete(
+        #         f"{api_url}/{new_record_id}/draft/files", headers=h
+        #     )
+
+        #     # Upload files
+        #     file_entries = []
+        #     for file_path in file_paths:
+        #         file_entries.append({"key": os.path.basename(file_path)})
+
+        #     # Initialize files
+        #     data = json.dumps(file_entries)
+        #     r = requests.post(
+        #         f"{api_url}/{new_record_id}/draft/files",
+        #         data=data,
+        #         headers=h,
+        #     )
+        #     if r.status_code != 201:
+        #         print(
+        #             f"Failed to initialize files for record {new_record_id} (code: {r.status_code})"
+        #         )
+        #         failed_updates.append(work_id)
+        #         continue
+
+        #     file_responses = r.json()["entries"]
+
+        #     # Upload each file
+        #     for i, file_path in enumerate(file_paths):
+        #         file_links = file_responses[i]["links"]
+
+        #         # Upload file content
+        #         with open(file_path, "rb") as fp:
+        #             r = requests.put(file_links["content"], data=fp, headers=fh)
+        #         if r.status_code != 200:
+        #             continue
+
+        #         # Commit the file
+        #         r = requests.post(file_links["commit"], headers=h)
+        #         if r.status_code != 200:
+        #             continue
+
+        #     # Add to E-LAUTE community
+        #     if ELAUTE_COMMUNITY_ID:
+        #         r = requests.put(
+        #             f"{api_url}/{new_record_id}/draft/review",
+        #             headers=h,
+        #             data=json.dumps(
+        #                 {
+        #                     "receiver": {"community": ELAUTE_COMMUNITY_ID},
+        #                     "type": "community-submission",
+        #                 }
+        #             ),
+        #         )
+
+        #     # Submit the review for the record draft
+        #     r = requests.post(
+        #         f"{api_url}/{record_id}/draft/actions/submit-review",
+        #         headers=h,
+        #     )
+        #     if not r.status_code == 202:
+        #         print(
+        #             f"Failed to submit review for record {record_id} (code: {r.status_code})"
+        #         )
+        #         failed_updates.append(work_id)
+
+        #     # Update mapping with new record ID and timestamp
+        #     updated_records.append(
+        #         {
+        #             "work_id": work_id,
+        #             "record_id": new_record_id,
+        #             "file_count": len(file_paths),
+        #             "created": mapping_row.iloc[0][
+        #                 "created"
+        #             ],  # Keep original timestamp
+        #             "updated": current_timestamp,
+        #         }
+        #     )
+
+        #     print(
+        #         f"Successfully updated record for work_id {work_id}: {new_record_id}"
+        #     )
+
+        # except Exception as e:
+        #     print(f"Error updating record for work_id {work_id}: {str(e)}")
+        #     failed_updates.append(work_id)
+        #     continue
 
     # Summary
     print("\nUPDATE SUMMARY:")
@@ -968,8 +862,6 @@ def process_work_ids_for_update_or_create():
     Create new records for new work_ids and update existing ones if metadata changed.
     """
 
-    # TODO: add get for work_ids and RDM_record_ids via RDM_API and check if update or create
-
     # Get all work_ids from files that currently are to be uploaded (either created or updated)
     work_ids = get_work_ids_from_files()
 
@@ -977,14 +869,14 @@ def process_work_ids_for_update_or_create():
         print("No work_ids found.")
         return [], []
 
-    mapping_file = MAPPING_FILE
+    existing_records = rdm_upload_utils.get_records_from_RDM(
+        RDM_API_TOKEN, RDM_API_URL, ELAUTE_COMMUNITY_ID
+    )
 
-    # Load existing mapping if it exists
-    if os.path.exists(mapping_file):
-        existing_mapping = pd.read_csv(mapping_file, sep=";")
-        existing_work_ids = set(existing_mapping["work_id"].tolist())
-    else:
-        existing_work_ids = set()
+    print(type(existing_records))
+    print(existing_records)
+
+    existing_work_ids = set(existing_records["elaute_id"].tolist())
 
     # Get work_ids from current files
     current_work_ids = set(work_ids)
@@ -996,14 +888,12 @@ def process_work_ids_for_update_or_create():
     return list(new_work_ids), list(existing_work_ids_to_check)
 
 
-def upload_mei_files(test_one=False):
+def upload_mei_files(work_ids, draft_one=False):
     """
     Process and upload MEI files to TU RDM grouped by work_id.
     Each work_id becomes one record with multiple files.
     """
-
-    # Get all work_ids
-    work_ids = get_work_ids_from_files()
+    failed_uploads = []
 
     if not work_ids:
         print("No work_ids found.")
@@ -1011,40 +901,15 @@ def upload_mei_files(test_one=False):
 
     # Check if we should only process one work_id (for testing)
 
-    upload_one_full = len(sys.argv) > 1 and "--upload-one-full" in sys.argv
-    draft_one = len(sys.argv) > 1 and "--draft-one" in sys.argv
-
     # If --draft-one is set, always process only one work_id
     if draft_one:
         work_ids = work_ids[:1]
         print(
             f"Testing upload with only one work_id (draft mode): {work_ids[0]}"
         )
-    elif upload_one_full:
-        work_ids = work_ids[:1]
-        print(
-            f"Testing complete upload with only one work_id (full workflow): {work_ids[0]}"
-        )
 
-    # HTTP Headers - following the working sample pattern
-    h = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {RDM_API_TOKEN}",
-    }
-
-    fh = {
-        "Accept": "application/json",
-        "Content-Type": "application/octet-stream",
-        "Authorization": f"Bearer {RDM_API_TOKEN}",
-    }
-
-    api_url = f"{RDM_API_URL}/records"
-    api_url_curations = f"{RDM_API_URL}/curations"
-
-    failed_uploads = []
-    record_mapping_data = []
-    current_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # HTTP Headers
+    h, fh = rdm_upload_utils.set_headers(RDM_API_TOKEN)
 
     for work_id in work_ids:
         print(f"\n--- Processing work_id: {work_id} ---")
@@ -1071,103 +936,18 @@ def upload_mei_files(test_one=False):
                 metadata_df, people_df, corporate_df, len(file_paths)
             )
 
-            print(f"Processing {work_id}: {len(file_paths)} files")
+            # ---- UPLOAD ---
 
-            # Save metadata for debugging
-            metadata_filename = f"tables/rdm_metadata_{work_id}.json"
-            with open(metadata_filename, "w", encoding="utf-8") as f:
-                json.dump(metadata, f, indent=2, ensure_ascii=False)
-
-            # Create draft record - following working sample pattern
-            r = requests.post(api_url, data=json.dumps(metadata), headers=h)
-            assert (
-                r.status_code == 201
-            ), f"Failed to create record (code: {r.status_code})"
-
-            links = r.json()["links"]
-            record_id = r.json()["id"]
-
-            # Store the mapping data for CSV
-            record_mapping_data.append(
-                {
-                    "work_id": work_id,
-                    "record_id": record_id,
-                    "file_count": len(file_paths),
-                    "created": current_timestamp,
-                    "updated": current_timestamp,
-                }
+            fails = rdm_upload_utils.upload_v2(
+                metadata=metadata,
+                elaute_id=work_id,
+                file_paths=file_paths,
+                RDM_API_TOKEN=RDM_API_TOKEN,
+                RDM_API_URL=RDM_API_URL,
+                ELAUTE_COMMUNITY_ID=ELAUTE_COMMUNITY_ID,
+                draft_one=draft_one,
             )
-
-            # Upload each file individually - following working sample pattern
-            i = 0
-            for file_path in file_paths:
-                filename = os.path.basename(file_path)
-
-                # Initiate the file
-                data = json.dumps([{"key": filename}])
-                r = requests.post(links["files"], data=data, headers=h)
-                assert (
-                    r.status_code == 201
-                ), f"Failed to create file {filename} (code: {r.status_code})"
-
-                file_links = r.json()["entries"][i]["links"]
-                i += 1
-
-                # Upload file content by streaming the data
-                with open(file_path, "rb") as fp:
-                    r = requests.put(file_links["content"], data=fp, headers=fh)
-                assert (
-                    r.status_code == 200
-                ), f"Failed to upload file content {filename} (code: {r.status_code})"
-
-                # Commit the file
-                r = requests.post(file_links["commit"], headers=h)
-                assert (
-                    r.status_code == 200
-                ), f"Failed to commit file {filename} (code: {r.status_code})"
-
-                # Add to E-LAUTE community
-            if ELAUTE_COMMUNITY_ID:
-                r = requests.put(
-                    f"{api_url}/{record_id}/draft/review",
-                    headers=h,
-                    data=json.dumps(
-                        {
-                            "receiver": {"community": ELAUTE_COMMUNITY_ID},
-                            "type": "community-submission",
-                        }
-                    ),
-                )
-                assert (
-                    r.status_code == 200
-                ), f"Failed to set review for record {record_id} (code: {r.status_code})"
-            else:
-                print(
-                    "Warning: ELAUTE_COMMUNITY_ID not set, skipping community submission"
-                )
-
-                # For production: create curation request and publish
-                # Only trigger curation and submit-review if not in --draft-one mode
-                if not (len(sys.argv) > 1 and "--draft-one" in sys.argv):
-                    r = requests.post(
-                        api_url_curations,
-                        headers=h,
-                        data=json.dumps({"topic": {"record": record_id}}),
-                    )
-                    assert (
-                        r.status_code == 201
-                    ), f"Failed to create curation for record {record_id} (code: {r.status_code})"
-
-                    # Submit the review for the record draft
-                    r = requests.post(
-                        f"{api_url}/{record_id}/draft/actions/submit-review",
-                        headers=h,
-                    )
-                    if not r.status_code == 202:
-                        print(
-                            f"Failed to submit review for record {record_id} (code: {r.status_code})"
-                        )
-                        failed_uploads.append(work_id)
+            failed_uploads.extend(fails)
 
         except AssertionError as e:
             print(f"Assertion error processing work_id {work_id}: {str(e)}")
@@ -1175,31 +955,6 @@ def upload_mei_files(test_one=False):
         except Exception as e:
             print(f"Error processing work_id {work_id}: {str(e)}")
             failed_uploads.append(work_id)
-
-    # Save work_id-to-record_id mapping as CSV
-    if record_mapping_data:
-        mapping_df = pd.DataFrame(record_mapping_data)
-
-        # Use consistent mapping file name and update existing file if it exists
-        mapping_file = MAPPING_FILE
-
-        if os.path.exists(mapping_file):
-            # Load existing mapping and append new records
-            existing_df = pd.read_csv(mapping_file, sep=";")
-            combined_df = pd.concat(
-                [existing_df, mapping_df], ignore_index=True
-            )
-            # Remove duplicates, keeping the latest entry for each work_id
-            combined_df = combined_df.drop_duplicates(
-                subset=["work_id"], keep="last"
-            )
-            combined_df.to_csv(mapping_file, index=False, sep=";")
-        else:
-            # Create new mapping file
-            mapping_df.to_csv(mapping_file, index=False, sep=";")
-
-        print(mapping_df.head())
-
     # Summary
     print("\nUPLOAD SUMMARY:")
     print(f"   Failed uploads: {len(failed_uploads)}")
@@ -1220,162 +975,14 @@ def main():
     # TODO: add check for work_ids and RDM_record_ids via RDM_API and check if update or create
 
     draft_one = len(sys.argv) > 1 and "--draft-one" in sys.argv
-    upload_one_full = len(sys.argv) > 1 and "--upload-one" in sys.argv
-    update_records = len(sys.argv) > 1 and "--update" in sys.argv
-    update_one = len(sys.argv) > 1 and "--update-one" in sys.argv
-    create_urls = len(sys.argv) > 1 and "--create-url-list" in sys.argv
 
-    if len(sys.argv) > 1 and sys.argv[1] == "--upload":
-        # Upload mode: process and upload files by work_id
-        print("Starting upload process...")
-        upload_mei_files()
-    elif create_urls:
-        # Create URL list from mapping file
-        print("Creating URL list from mapping file...")
-        create_url_list()
-    elif upload_one_full:
-        # Upload one work_id with full workflow (curation + publishing)
-        print(
-            "Testing complete upload process with one work_id (including curation and publishing)..."
-        )
-        upload_mei_files(test_one=False)
-    elif draft_one:
-        # Upload one work_id for testing (draft only)
-        print("Testing upload process with one work_id (draft only)...")
-        upload_mei_files(test_one=True)
-    elif update_records:
-        # Update mode: check for changes and update existing records
-        print("Starting update process for all existing records...")
-        new_work_ids, existing_work_ids = (
-            process_work_ids_for_update_or_create()
-        )
+    new_work_ids, existing_work_ids = process_work_ids_for_update_or_create()
 
-        if existing_work_ids:
-            update_records_in_RDM(existing_work_ids)
-        else:
-            print("No existing records found to update.")
+    if len(new_work_ids) > 0:
+        upload_mei_files(new_work_ids, draft_one)
 
-        if new_work_ids:
-            print(
-                f"\nFound {len(new_work_ids)} new work_ids that could be uploaded with --upload"
-            )
-    elif update_one:
-        # Update one work_id for testing
-        print("Testing update process with one existing work_id...")
-        new_work_ids, existing_work_ids = (
-            process_work_ids_for_update_or_create()
-        )
-
-        if existing_work_ids:
-            # Just update the first existing work_id
-            test_work_ids = existing_work_ids[:1]
-            print(f"Testing update with work_id: {test_work_ids[0]}")
-            update_records_in_RDM(test_work_ids)
-        else:
-            print("No existing records found to update.")
-    else:
-        # Test mode: show work_ids and file groupings
-        print("Scanning for work_ids...")
-        work_ids = get_work_ids_from_files()
-
-        if not work_ids:
-            print("No work_ids found.")
-            return
-
-        print(f"Found {len(work_ids)} work_ids:")
-
-        for work_id in work_ids:
-            files = get_files_for_work_id(work_id)
-            print(f"   - {work_id}: {len(files)} files")
-            for file_path in files:
-                print(f"     * {os.path.basename(file_path)}")
-
-
-def create_url_list():
-    """Create URL list from mapping file with latest records per work_id"""
-    if not os.path.exists(MAPPING_FILE):
-        print(f"Mapping file {MAPPING_FILE} not found. Cannot create URL list.")
-        return
-
-    # Read the mapping file
-    record_df = pd.read_csv(MAPPING_FILE, sep=";")
-
-    # Get only the most recent record_id for each work_id
-    latest_records = record_df.loc[
-        record_df.groupby("work_id")["updated"].idxmax()
-    ]  # HTTP Headers for API requests
-    h = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {RDM_API_TOKEN}",
-    }
-
-    self_html_list = []
-    parent_html_list = []
-    failed_records = []
-
-    api_url = f"{RDM_API_URL}/records"
-
-    # Process each record with progress indicator
-    print("Fetching URLs from RDM API...")
-    for i, r_id in enumerate(latest_records["record_id"], 1):
-        print(f"Processing record {i}/{len(latest_records)}: {r_id}")
-
-        try:
-            r = requests.get(f"{api_url}/{r_id}", headers=h, timeout=30)
-
-            if r.status_code != 200:
-                print(
-                    f" Failed to fetch record {r_id} (status: {r.status_code})"
-                )
-                failed_records.append(r_id)
-                parent_html_list.append("")
-                self_html_list.append("")
-                continue
-
-            response_json = r.json()
-            links = response_json.get("links", {})
-
-            parent_html = links.get("parent_html", "")
-            self_html = links.get("self_html", "")
-
-            parent_html_list.append(parent_html)
-            self_html_list.append(self_html)
-
-        except requests.exceptions.Timeout:
-            failed_records.append(r_id)
-            parent_html_list.append("")
-            self_html_list.append("")
-        except Exception:
-            failed_records.append(r_id)
-            parent_html_list.append("")
-            self_html_list.append("")
-
-    # Verify list lengths match
-    assert len(parent_html_list) == len(
-        latest_records
-    ), f"Length mismatch: parent_html_list ({len(parent_html_list)}) vs latest_records ({len(latest_records)})"
-    assert len(self_html_list) == len(
-        latest_records
-    ), f"Length mismatch: self_html_list ({len(self_html_list)}) vs latest_records ({len(latest_records)})"
-
-    latest_records = latest_records.copy()
-    latest_records["all_versions_url"] = parent_html_list
-    latest_records["current_version_url"] = self_html_list
-
-    # Save the current URL mappings (not historical data)
-    latest_records.to_csv(URL_LIST_FILE, index=False, sep=";")
-
-    print(
-        f"\nCreated URL list with {len(latest_records)} records: {URL_LIST_FILE}"
-    )
-
-    if failed_records:
-        print(f"Failed to process {len(failed_records)} records:")
-        for failed_id in failed_records:
-            print(f"  - {failed_id}")
-    else:
-        print("All records processed successfully!")
+    if len(existing_work_ids) > 0:
+        update_records_in_RDM(existing_work_ids, draft_one)
 
 
 if __name__ == "__main__":

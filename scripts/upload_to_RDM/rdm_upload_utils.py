@@ -1,5 +1,8 @@
 import requests
 import os
+import json
+
+import pandas as pd
 
 # from pathlib import Path
 
@@ -30,9 +33,6 @@ def setup_for_rdm_api_access(TESTING_MODE=True, GA_MODE=False):
 
     if TESTING_MODE:
         RDM_API_URL = "https://test.researchdata.tuwien.ac.at/api"
-        MAPPING_FILE = "work_id_record_id_mapping_TESTING.csv"
-        URL_LIST_FILE = "url_list_TESTING.csv"
-
         ELAUTE_COMMUNITY_ID = get_id_from_api(
             f"{RDM_API_URL}/communities/e-laute-test"
         )
@@ -48,12 +48,9 @@ def setup_for_rdm_api_access(TESTING_MODE=True, GA_MODE=False):
 
     else:
         RDM_API_URL = "https://researchdata.tuwien.ac.at/api"
-        MAPPING_FILE = "work_id_record_id_mapping.csv"
-        URL_LIST_FILE = "url_list.csv"
         ELAUTE_COMMUNITY_ID = get_id_from_api(
             f"{RDM_API_URL}/communities/e-laute"
         )
-
         if GA_MODE:
             print(" 🚀 Running in GitHubActions PRODUCTION mode")
             RDM_API_TOKEN = os.environ["RDM_API_TOKEN_JJ"]
@@ -65,29 +62,18 @@ def setup_for_rdm_api_access(TESTING_MODE=True, GA_MODE=False):
             print("🚀 Running in local PRODUCTION mode")
             RDM_API_TOKEN = os.getenv("RDM_API_TOKEN")
 
-    print(f"Using mapping file: {MAPPING_FILE}")
-    print(f"Using URL list file: {URL_LIST_FILE}")
-    print(f"Using API URL: {RDM_API_URL}")
-
-    if ELAUTE_COMMUNITY_ID:
-        print(f"Community ID: {ELAUTE_COMMUNITY_ID}")
-    else:
-        print("Warning: Could not fetch community ID")
-
     if GA_MODE:
         # this is equal to the home dir in the sources repository (so where the files that should be uploaded are located)
         FILES_PATH = "./caller-repo/"  # TODO: with or without Path??
         # FILES_PATH = Path("./caller-repo/")
     else:
-        FILES_PATH = "files/"
+        FILES_PATH = "scripts/upload_to_RDM/files/"
 
     return (
         RDM_API_URL,
         RDM_API_TOKEN,
         FILES_PATH,
         ELAUTE_COMMUNITY_ID,
-        MAPPING_FILE,
-        URL_LIST_FILE,
     )
 
 
@@ -151,3 +137,370 @@ def create_related_identifiers(links):
             },
         )
     return related_identifiers
+
+
+def set_headers(RDM_API_TOKEN):
+
+    h = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {RDM_API_TOKEN}",
+    }
+    fh = {
+        "Accept": "application/json",
+        "Content-Type": "application/octet-stream",
+        "Authorization": f"Bearer {RDM_API_TOKEN}",
+    }
+    return h, fh
+
+
+def get_records_from_RDM(RDM_API_TOKEN, RDM_API_URL, ELAUTE_COMMUNITY_ID):
+    """
+    Fetch records from the RDM API.
+    """
+    h, fh = set_headers(RDM_API_TOKEN)
+    response = requests.get(
+        f"{RDM_API_URL}/communities/{ELAUTE_COMMUNITY_ID}/records",
+        headers=h,
+    )
+
+    if not response.status_code == 200:
+        print(f"Error fetching records from RDM: {response.status_code}")
+        return None
+
+    records = []
+    hits = response.json().get("hits", {}).get("hits", [])
+    for hit in hits:
+        record_id = hit.get("id")
+        parent_id = hit.get("parent", {}).get("id")
+        file_count = hit.get("files", {}).get("count")
+        created = hit.get("created")
+        updated = hit.get("updated")
+        # Try to extract elaute_id from identifiers (other)
+        elaute_id = None
+        metadata = hit.get("metadata", {})
+        identifiers = metadata.get("identifiers")
+        for ident in identifiers or []:
+            if ident.get("scheme") == "other":
+                elaute_id = ident.get("identifier")
+                break
+        if not elaute_id:
+            print(f"Unknown E-LAUTE ID for record {record_id}")
+        records.append(
+            {
+                "elaute_id": elaute_id,
+                "record_id": record_id,
+                "parent_id": parent_id,
+                "file_count": file_count,
+                "created": created,
+                "updated": updated,
+            }
+        )
+    return pd.DataFrame(records)
+
+
+def upload_new_record(
+    elaute_id,
+    file_path,
+    metadata_structure,
+    RDM_API_TOKEN,
+    RDM_API_URL,
+    ELAUTE_COMMUNITY_ID,
+):
+    """
+    Upload a new record to RDM for the given source_id and file_path.
+    Returns tuple (success, error_message or None)
+    """
+    h, fh = set_headers(RDM_API_TOKEN)
+
+    try:
+        r = requests.post(
+            f"{RDM_API_URL}/records",
+            data=json.dumps(metadata_structure),
+            headers=h,
+        )
+        if r.status_code != 201:
+            return False, f"Failed to create record (code: {r.status_code})"
+        links = r.json()["links"]
+        record_id = r.json()["id"]
+        filename = os.path.basename(file_path)
+        data = json.dumps([{"key": filename}])
+        r = requests.post(links["files"], data=data, headers=h)
+        if r.status_code != 201:
+            return (
+                False,
+                f"Failed to create file {filename} (code: {r.status_code})",
+            )
+        file_links = r.json()["entries"][0]["links"]
+        with open(file_path, "rb") as fp:
+            r = requests.put(file_links["content"], data=fp, headers=fh)
+        if r.status_code != 200:
+            return (
+                False,
+                f"Failed to upload file content {filename} (code: {r.status_code})",
+            )
+        r = requests.post(file_links["commit"], headers=h)
+        if r.status_code != 200:
+            return (
+                False,
+                f"Failed to commit file {filename} (code: {r.status_code})",
+            )
+        if ELAUTE_COMMUNITY_ID:
+            r = requests.put(
+                f"{RDM_API_URL}/records/{record_id}/draft/review",
+                headers=h,
+                data=json.dumps(
+                    {
+                        "receiver": {"community": ELAUTE_COMMUNITY_ID},
+                        "type": "community-submission",
+                    }
+                ),
+            )
+            if r.status_code != 200:
+                return (
+                    False,
+                    f"Failed to set review for record {record_id} (code: {r.status_code})",
+                )
+        r = requests.post(
+            f"{RDM_API_URL}/curations",
+            headers=h,
+            data=json.dumps({"topic": {"record": record_id}}),
+        )
+        if r.status_code != 201:
+            return (
+                False,
+                f"Failed to create curation for record {record_id} (code: {r.status_code})",
+            )
+        r = requests.post(
+            f"{RDM_API_URL}/records/{record_id}/draft/actions/submit-review",
+            headers=h,
+        )
+        if not r.status_code == 202:
+            return (
+                False,
+                f"Failed to submit review for record {record_id} (code: {r.status_code})",
+            )
+        return True, None
+    except Exception as e:
+        return (
+            False,
+            f"Error uploading record for elaute_id {elaute_id}: {str(e)}",
+        )
+
+
+def upload_v2(
+    metadata,
+    elaute_id,
+    file_paths,
+    RDM_API_TOKEN,
+    RDM_API_URL,
+    ELAUTE_COMMUNITY_ID,
+    draft_one=False,
+):
+    failed_uploads = []
+    print(f"Processing {elaute_id}: {len(file_paths)} files")
+    h, fh = set_headers(RDM_API_TOKEN)
+
+    # Create draft record - following working sample pattern
+    r = requests.post(
+        f"{RDM_API_URL}/records", data=json.dumps(metadata), headers=h
+    )
+    assert (
+        r.status_code == 201
+    ), f"Failed to create record (code: {r.status_code})"
+
+    links = r.json()["links"]
+    record_id = r.json()["id"]
+
+    # Upload each file individually - following working sample pattern
+    i = 0
+    for file_path in file_paths:
+        filename = os.path.basename(file_path)
+
+        # Initiate the file
+        data = json.dumps([{"key": filename}])
+        r = requests.post(links["files"], data=data, headers=h)
+        assert (
+            r.status_code == 201
+        ), f"Failed to create file {filename} (code: {r.status_code})"
+
+        file_links = r.json()["entries"][i]["links"]
+        i += 1
+
+        # Upload file content by streaming the data
+        with open(file_path, "rb") as fp:
+            r = requests.put(file_links["content"], data=fp, headers=fh)
+        assert (
+            r.status_code == 200
+        ), f"Failed to upload file content {filename} (code: {r.status_code})"
+
+        # Commit the file
+        r = requests.post(file_links["commit"], headers=h)
+        assert (
+            r.status_code == 200
+        ), f"Failed to commit file {filename} (code: {r.status_code})"
+
+        # Add to E-LAUTE community
+    if ELAUTE_COMMUNITY_ID:
+        r = requests.put(
+            f"{RDM_API_URL}/records/{record_id}/draft/review",
+            headers=h,
+            data=json.dumps(
+                {
+                    "receiver": {"community": ELAUTE_COMMUNITY_ID},
+                    "type": "community-submission",
+                }
+            ),
+        )
+        assert (
+            r.status_code == 200
+        ), f"Failed to set review for record {record_id} (code: {r.status_code})"
+    else:
+        print(
+            "Warning: ELAUTE_COMMUNITY_ID not set, skipping community submission"
+        )
+
+    # For production: create curation request and publish
+    # Only trigger curation and submit-review if not in --draft-one mode
+    if not draft_one:
+        r = requests.post(
+            f"{RDM_API_URL}/curations",
+            headers=h,
+            data=json.dumps({"topic": {"record": record_id}}),
+        )
+        assert (
+            r.status_code == 201
+        ), f"Failed to create curation for record {record_id} (code: {r.status_code})"
+
+        # Submit the review for the record draft
+        r = requests.post(
+            f"{RDM_API_URL}/records/{record_id}/draft/actions/submit-review",
+            headers=h,
+        )
+        if not r.status_code == 202:
+            print(
+                f"Failed to submit review for record {record_id} (code: {r.status_code})"
+            )
+            failed_uploads.append(elaute_id)
+
+    return failed_uploads
+
+
+def normalize_for_comparison(obj):
+    """Normalize data structures for more reliable comparison"""
+    if obj is None:
+        return None
+    elif isinstance(obj, str):
+        normalized = obj.strip()
+        return None if normalized == "" else normalized
+    elif isinstance(obj, list):
+        normalized_items = []
+        for item in obj:
+            if item is not None:
+                normalized_item = normalize_for_comparison(item)
+                if normalized_item is not None:
+                    normalized_items.append(normalized_item)
+
+        try:
+            return sorted(
+                normalized_items,
+                key=lambda x: (
+                    json.dumps(x, sort_keys=True)
+                    if isinstance(x, dict)
+                    else str(x)
+                ),
+            )
+        except (TypeError, ValueError):
+            return normalized_items
+    elif isinstance(obj, dict):
+        normalized_dict = {}
+        for k, v in obj.items():
+            normalized_value = normalize_for_comparison(v)
+            if normalized_value is not None:
+                normalized_dict[k] = normalized_value
+        return normalized_dict if normalized_dict else None
+    else:
+        return obj
+
+
+def deep_compare_metadata(current_value, new_value):
+    """Compare two metadata values with normalization"""
+    normalized_current = normalize_for_comparison(current_value)
+    normalized_new = normalize_for_comparison(new_value)
+
+    if normalized_current is None and normalized_new is None:
+        return True
+    if normalized_current is None or normalized_new is None:
+        return False
+
+    if isinstance(normalized_current, dict) and isinstance(
+        normalized_new, dict
+    ):
+        try:
+            current_json = json.dumps(
+                normalized_current,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            new_json = json.dumps(
+                normalized_new,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            return current_json == new_json
+        except (TypeError, ValueError):
+            if set(normalized_current.keys()) != set(normalized_new.keys()):
+                return False
+            for key in normalized_current.keys():
+                if not deep_compare_metadata(
+                    normalized_current[key], normalized_new[key]
+                ):
+                    return False
+            return True
+
+    if isinstance(normalized_current, list) and isinstance(
+        normalized_new, list
+    ):
+        current_set = set()
+        new_set = set()
+
+        for item in normalized_current:
+            try:
+                item_str = (
+                    json.dumps(item, sort_keys=True)
+                    if isinstance(item, dict)
+                    else str(item)
+                )
+                current_set.add(item_str)
+            except (TypeError, ValueError):
+                current_set.add(str(item))
+
+        for item in normalized_new:
+            try:
+                item_str = (
+                    json.dumps(item, sort_keys=True)
+                    if isinstance(item, dict)
+                    else str(item)
+                )
+                new_set.add(item_str)
+            except (TypeError, ValueError):
+                new_set.add(str(item))
+
+        return current_set == new_set
+
+    try:
+        current_json = json.dumps(
+            normalized_current,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        new_json = json.dumps(
+            normalized_new, sort_keys=True, separators=(",", ":")
+        )
+        return current_json == new_json
+    except (TypeError, ValueError):
+        return normalized_current == normalized_new
+
+
+# if __name__ == "__main__":
+#     pass
