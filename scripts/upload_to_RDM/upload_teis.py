@@ -1,19 +1,15 @@
 from datetime import datetime
-
 import requests
-
 import pandas as pd
 import os
 import sys
 from lxml import etree
-
 import json
 
 # TODO: where and how to fetch the files from?
 # - gitlab repo? (then I need credentials from there as well, I think)
 
-
-import rdm_upload_utils
+from . import rdm_upload_utils
 
 
 (
@@ -21,13 +17,15 @@ import rdm_upload_utils
     RDM_API_TOKEN,
     FILES_PATH,
     ELAUTE_COMMUNITY_ID,
-    MAPPING_FILE,
-    URL_LIST_FILE,
 ) = rdm_upload_utils.setup_for_rdm_api_access(TESTING_MODE=True, GA_MODE=False)
 
 # TODO: remove this and change the logic so that all files from the FILE_PATH are taken
-sources_table = pd.read_csv("tables/filepath_id_lookup.csv")
-sources_info_lookup_df = pd.read_excel("tables/sources_table.xlsx")
+sources_table = pd.read_csv(
+    "scripts/upload_to_RDM/tables/file_name_id_lookup.csv"
+)
+sources_info_lookup_df = pd.read_excel(
+    "scripts/upload_to_RDM/tables/sources_table.xlsx"
+)
 
 
 columns_to_merge = ["Title", "Source_link", "DOI", "RISM_link", "VD_16"]
@@ -40,10 +38,7 @@ merged = sources_table.merge(
 sources_table = (
     merged.drop(columns=["ID"]) if "ID" in merged.columns else merged
 )
-# Optionally drop the extra 'source_id' column if not needed
-sources_table = (
-    merged.drop(columns=["ID"]) if "ID" in merged.columns else merged
-)
+sources_table["file_path"] = FILES_PATH + sources_table["file_name"]
 
 
 def extract_title_versions(title_elem, ns):
@@ -286,7 +281,6 @@ def create_description(row):
         rdm_upload_utils.make_html_link(link) for link in valid_links
     )
 
-    # links_stringified = ", ".join(look_up_source_links(row["source_id"]))
     source_id = row["source_id"]
     platform_link = rdm_upload_utils.make_html_link(
         f"https://edition.onb.ac.at/fedora/objects/o:lau.{source_id}/methods/sdef:TEI/get"
@@ -386,6 +380,9 @@ def fill_out_basic_metadata(metadata_row, people_df, corporate_df):
             "creators": [],
             "contributors": [],
             "description": create_description(row),
+            "identifiers": [
+                {"identifier": f"{row['source_id']}", "scheme": "other"}
+            ],
             "publication_date": datetime.today().strftime("%Y-%m-%d"),
             "dates": [
                 {
@@ -516,7 +513,9 @@ def fill_out_basic_metadata(metadata_row, people_df, corporate_df):
             metadata["metadata"]["contributors"].append(person_entry)
 
     # Add source links as related identifiers
-    links_to_source = rdm_upload_utils.look_up_source_links(row["source_id"])
+    links_to_source = rdm_upload_utils.look_up_source_links(
+        sources_table, row["source_id"]
+    )
     # Filter out empty, None, or NaN links
     links_to_source = [
         link
@@ -542,29 +541,18 @@ def get_metadata_for_source(source_id, file_path):
 def update_records_in_RDM(source_ids_to_update):
     """Update existing records in RDM if metadata has changed. Only report files that did not reach and pass submit-review."""
 
-    h = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {RDM_API_TOKEN}",
-    }
-    fh = {
-        "Accept": "application/json",
-        "Content-Type": "application/octet-stream",
-        "Authorization": f"Bearer {RDM_API_TOKEN}",
-    }
+    h, fh = rdm_upload_utils.set_headers(RDM_API_TOKEN)
 
-    mapping_file = MAPPING_FILE
-    if not os.path.exists(mapping_file):
-        print(f"Mapping file {mapping_file} not found. No records to update.")
-        return
+    existing_records = rdm_upload_utils.get_records_from_RDM(
+        RDM_API_TOKEN, RDM_API_URL, ELAUTE_COMMUNITY_ID
+    )
 
-    existing_mapping = pd.read_csv(mapping_file, sep=";")
     failed_uploads = []
 
     for source_id in source_ids_to_update:
         print(f"\n--- Checking for updates: {source_id} ---")
-        mapping_row = existing_mapping[
-            existing_mapping["source_id"] == source_id
+        mapping_row = existing_records[
+            existing_records["elaute_id"] == source_id
         ]
         if mapping_row.empty:
             print(
@@ -611,6 +599,7 @@ def update_records_in_RDM(source_ids_to_update):
                 "creators",
                 "contributors",
                 "description",
+                "identifiers",
                 "dates",
                 "publisher",
                 "references",
@@ -860,28 +849,30 @@ def update_records_in_RDM(source_ids_to_update):
     return failed_uploads
 
 
-def process_source_ids_for_update_or_create():
+def get_source_ids_from_files():
+    pass
+
+
+def process_elaute_ids_for_update_or_create():
     """
     Check which source_ids already exist in RDM and split accordingly.
     Create new records for new source_ids and update existing ones if metadata changed.
     """
 
     # Get all source_ids from files
-    source_ids = sources_table["source_id"].tolist()
+
+    # TODO: implement this and find a way to handle the stupidly inconsistent naming
+    source_ids = get_source_ids_from_files()
 
     if not source_ids:
         print("No source ids found.")
         return [], []
 
-    mapping_file = MAPPING_FILE
+    existing_records = rdm_upload_utils.get_records_from_RDM(
+        RDM_API_TOKEN, RDM_API_URL, ELAUTE_COMMUNITY_ID
+    )
 
-    # Load existing mapping if it exists
-    if os.path.exists(mapping_file):
-        existing_mapping = pd.read_csv(mapping_file, sep=";")
-        existing_source_ids = set(existing_mapping["source_id"].tolist())
-    else:
-        existing_source_ids = set()
-
+    existing_source_ids = set(existing_records["elaute_id"].tolist())
     # Get source_ids from current files
     current_source_ids = set(source_ids)
 
@@ -892,7 +883,7 @@ def process_source_ids_for_update_or_create():
     return list(new_source_ids), list(existing_source_ids_to_check)
 
 
-def upload_tei_files(test_one=False, test_all=False):
+def upload_tei_files():
     """
     Process and upload TEI files to TU RDM, one record per source_id/file_path.
     """
@@ -906,31 +897,15 @@ def upload_tei_files(test_one=False, test_all=False):
         return
 
     # Check if we should only process one source (for testing)
-    upload_one_full = len(sys.argv) > 1 and "--upload-one-full" in sys.argv
-    upload_one = len(sys.argv) > 1 and "--upload-one" in sys.argv
+    draft_one = len(sys.argv) > 1 and "--draft-one" in sys.argv
 
-    if upload_one or upload_one_full:
+    if draft_one:
         sources = sources[:1]
-        if upload_one:
-            print(
-                f"Testing upload with only one source (draft mode): {sources[0]['source_id']}"
-            )
-        elif upload_one_full:
-            print(
-                f"Testing complete upload with only one source (full workflow): {sources[0]['source_id']}"
-            )
+        print(
+            f"Testing upload process with one source_id (draft only): {sources[0]['source_id']}"
+        )
     # HTTP Headers
-    h = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {RDM_API_TOKEN}",
-    }
-
-    fh = {
-        "Accept": "application/json",
-        "Content-Type": "application/octet-stream",
-        "Authorization": f"Bearer {RDM_API_TOKEN}",
-    }
+    h, fh = rdm_upload_utils.set_headers(RDM_API_TOKEN)
 
     api_url = f"{RDM_API_URL}/records"
     api_url_curations = f"{RDM_API_URL}/curations"
@@ -1030,26 +1005,28 @@ def upload_tei_files(test_one=False, test_all=False):
                     "Warning: ELAUTE_COMMUNITY_ID not set, skipping community submission"
                 )
 
-            # For production: create curation request and publish
-            r = requests.post(
-                api_url_curations,
-                headers=h,
-                data=json.dumps({"topic": {"record": record_id}}),
-            )
-            assert (
-                r.status_code == 201
-            ), f"Failed to create curation for record {record_id} (code: {r.status_code})"
-
-            # Submit the review for the record draft
-            r = requests.post(
-                f"{api_url}/{record_id}/draft/actions/submit-review",
-                headers=h,
-            )
-            if not r.status_code == 202:
-                print(
-                    f"Failed to submit review for record {record_id} (code: {r.status_code})"
+            # Only submit review if not in draft_one mode
+            if not draft_one:
+                # create curation request
+                r = requests.post(
+                    api_url_curations,
+                    headers=h,
+                    data=json.dumps({"topic": {"record": record_id}}),
                 )
-                failed_uploads.append(source_id)
+                assert (
+                    r.status_code == 201
+                ), f"Failed to create curation for record {record_id} (code: {r.status_code})"
+
+                # Submit the review to start publication process in RDM (continue in RDM interface)
+                r = requests.post(
+                    f"{api_url}/{record_id}/draft/actions/submit-review",
+                    headers=h,
+                )
+                if not r.status_code == 202:
+                    print(
+                        f"Failed to submit review for record {record_id} (code: {r.status_code})"
+                    )
+                    failed_uploads.append(source_id)
 
         except AssertionError as e:
             print(f"Assertion error processing source_id {source_id}: {str(e)}")
@@ -1057,23 +1034,6 @@ def upload_tei_files(test_one=False, test_all=False):
         except Exception as e:
             print(f"Error processing source_id {source_id}: {str(e)}")
             failed_uploads.append(source_id)
-
-    # Save source_id-to-record_id mapping as CSV
-    if record_mapping_data:
-        mapping_df = pd.DataFrame(record_mapping_data)
-        mapping_file = MAPPING_FILE
-        if os.path.exists(mapping_file):
-            existing_df = pd.read_csv(mapping_file, sep=";")
-            combined_df = pd.concat(
-                [existing_df, mapping_df], ignore_index=True
-            )
-            combined_df = combined_df.drop_duplicates(
-                subset=["source_id"], keep="last"
-            )
-            combined_df.to_csv(mapping_file, index=False, sep=";")
-        else:
-            mapping_df.to_csv(mapping_file, index=False, sep=";")
-        print(mapping_df.head())
 
         # Summary
 
@@ -1097,156 +1057,17 @@ def upload_tei_files(test_one=False, test_all=False):
 
 def main():
     """
-    Main function - choose between testing extraction, uploading files, or updating records.
+    Consolidated main: for each source_id, update if exists, else upload.
     """
-    # Check for flags
-    upload_one = len(sys.argv) > 1 and "--draft-one" in sys.argv
-    upload_one_full = len(sys.argv) > 1 and "--upload-one" in sys.argv
-    update_records = len(sys.argv) > 1 and "--update" in sys.argv
-    update_one = len(sys.argv) > 1 and "--update-one" in sys.argv
-    create_urls = len(sys.argv) > 1 and "--create-url-list" in sys.argv
+    draft_one = len(sys.argv) > 1 and "--draft-one" in sys.argv
 
-    if len(sys.argv) > 1 and sys.argv[1] == "--upload":
-        print("Starting upload process...")
-        upload_tei_files()
-    elif upload_one_full:
-        print(
-            "Testing complete upload process with one source_id (including curation and publishing)..."
-        )
-        upload_tei_files(test_one=False)
-    elif upload_one:
-        print("Testing upload process with one source_id (draft only)...")
-        upload_tei_files(test_one=True)
-    elif create_urls:
-        print("Creating URL list from mapping file...")
-        create_url_list()
-    elif update_records:
-        print("Starting update process for all existing records...")
-        new_source_ids, existing_source_ids = (
-            process_source_ids_for_update_or_create()
-        )
+    new_work_ids, existing_work_ids = process_elaute_ids_for_update_or_create()
 
-        if existing_source_ids:
-            update_records_in_RDM(existing_source_ids)
-        else:
-            print("No existing records found to update.")
+    if len(new_work_ids) > 0:
+        upload_tei_files(new_work_ids, draft_one)
 
-        if new_source_ids:
-            print(
-                f"\nFound {len(new_source_ids)} new source_ids that could be uploaded with --upload"
-            )
-    elif update_one:
-        print("Testing update process with one existing source_id...")
-        new_source_ids, existing_source_ids = (
-            process_source_ids_for_update_or_create()
-        )
-
-        if existing_source_ids:
-            test_source_ids = existing_source_ids[:1]
-            print(f"Testing update with source_id: {test_source_ids[0]}")
-            update_records_in_RDM(test_source_ids)
-        else:
-            print("No existing records found to update.")
-    else:
-        print("Scanning for source_ids...")
-        sources = sources_table[["source_id", "file_path"]].to_dict(
-            orient="records"
-        )
-        if not sources:
-            print("No sources found.")
-            return
-        print(f"Found {len(sources)} source_ids:")
-        for source in sources:
-            print(
-                f"   - {source['source_id']}: {os.path.basename(source['file_path'])}"
-            )
-
-
-def create_url_list():
-    """Create URL list from mapping file with latest records per source_id"""
-    if not os.path.exists(MAPPING_FILE):
-        print(f"Mapping file {MAPPING_FILE} not found. Cannot create URL list.")
-        return
-
-    # Read the mapping file
-    record_df = pd.read_csv(MAPPING_FILE, sep=";")
-
-    # Get only the most recent record_id for each source_id
-    latest_records = record_df.loc[
-        record_df.groupby("source_id")["updated"].idxmax()
-    ]  # HTTP Headers for API requests
-    h = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {RDM_API_TOKEN}",
-    }
-
-    self_html_list = []
-    parent_html_list = []
-    failed_records = []
-
-    # Process each record with progress indicator
-    print("Fetching URLs from RDM API...")
-    for i, r_id in enumerate(latest_records["record_id"], 1):
-        print(f"Processing record {i}/{len(latest_records)}: {r_id}")
-
-        try:
-            r = requests.get(
-                f"{RDM_API_URL}/records/{r_id}", headers=h, timeout=30
-            )
-
-            if r.status_code != 200:
-                print(
-                    f" Failed to fetch record {r_id} (status: {r.status_code})"
-                )
-                failed_records.append(r_id)
-                parent_html_list.append("")
-                self_html_list.append("")
-                continue
-
-            response_json = r.json()
-            links = response_json.get("links", {})
-
-            parent_html = links.get("parent_html", "")
-            self_html = links.get("self_html", "")
-
-            parent_html_list.append(parent_html)
-            self_html_list.append(self_html)
-
-        except requests.exceptions.Timeout:
-            failed_records.append(r_id)
-            parent_html_list.append("")
-            self_html_list.append("")
-        except Exception:
-            failed_records.append(r_id)
-            parent_html_list.append("")
-            self_html_list.append("")
-
-    # Verify list lengths match
-    assert len(parent_html_list) == len(
-        latest_records
-    ), f"Length mismatch: parent_html_list ({len(parent_html_list)}) vs latest_records ({len(latest_records)})"
-    assert len(self_html_list) == len(
-        latest_records
-    ), f"Length mismatch: self_html_list ({len(self_html_list)}) vs latest_records ({len(latest_records)})"
-
-    latest_records = latest_records.copy()
-    latest_records["all_versions_url"] = parent_html_list
-    latest_records["current_version_url"] = self_html_list
-
-    # Save the current URL mappings (not historical data)
-    latest_records.to_csv(URL_LIST_FILE, index=False, sep=";")
-
-    print(
-        f"\nCreated URL list with {len(latest_records)} records: {URL_LIST_FILE}"
-    )
-
-    if failed_records:
-        print(f"Failed to process {len(failed_records)} records:")
-        for failed_id in failed_records:
-            print(f"  - {failed_id}")
-    else:
-        print("All records processed successfully!")
+    if len(existing_work_ids) > 0:
+        update_records_in_RDM(existing_work_ids, draft_one)
 
 
 if __name__ == "__main__":
