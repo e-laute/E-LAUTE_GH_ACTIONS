@@ -350,33 +350,6 @@ def fill_out_basic_metadata(metadata_row, people_df, corporate_df):
         "metadata": {
             "title": f'{row["title"]} ({row["source_id"]}) TEI Transcription',
             "additional_titles": additional_titles,
-            # "additional_titles": [
-            #     {
-            #         "lang": {
-            #             "id": "gmh",
-            #             "title": {"en": "Middle High German (ca. 1050-1500)"},
-            #         },
-            #         "title": row["title"],
-            #         "type": {
-            #             "id": "alternative-title",
-            #             "title": {"en": "Alternative title"},
-            #         },
-            #     },
-            #     (
-            #         (
-            #             {
-            #                 "lang": {"id": "deu", "title": {"en": "German"}},
-            #                 "title": row["translated_title"],
-            #                 "type": {
-            #                     "id": "translated-title",
-            #                     "title": {"en": "Translated title"},
-            #                 },
-            #             },
-            #         )
-            #         if row["translated_title"]
-            #         else None
-            #     ),
-            # ],
             "creators": [],
             "contributors": [],
             "description": create_description(row),
@@ -538,7 +511,7 @@ def get_metadata_for_source(source_id, file_path):
     return metadata_df, people_df, corporate_df
 
 
-def update_records_in_RDM(source_ids_to_update):
+def update_records_in_RDM(source_ids_to_update, draft_one=False):
     """Update existing records in RDM if metadata has changed. Only report files that did not reach and pass submit-review."""
 
     h, fh = rdm_upload_utils.set_headers(RDM_API_TOKEN)
@@ -607,123 +580,6 @@ def update_records_in_RDM(source_ids_to_update):
                 "resource_type",
                 "rights",
             ]
-
-            def normalize_for_comparison(obj):
-                """Normalize data structures for more reliable comparison"""
-                if obj is None:
-                    return None
-                elif isinstance(obj, str):
-                    normalized = obj.strip()
-                    return None if normalized == "" else normalized
-                elif isinstance(obj, list):
-                    normalized_items = []
-                    for item in obj:
-                        if item is not None:
-                            normalized_item = normalize_for_comparison(item)
-                            if normalized_item is not None:
-                                normalized_items.append(normalized_item)
-
-                    try:
-                        return sorted(
-                            normalized_items,
-                            key=lambda x: (
-                                json.dumps(x, sort_keys=True)
-                                if isinstance(x, dict)
-                                else str(x)
-                            ),
-                        )
-                    except (TypeError, ValueError):
-                        return normalized_items
-                elif isinstance(obj, dict):
-                    normalized_dict = {}
-                    for k, v in obj.items():
-                        normalized_value = normalize_for_comparison(v)
-                        if normalized_value is not None:
-                            normalized_dict[k] = normalized_value
-                    return normalized_dict if normalized_dict else None
-                else:
-                    return obj
-
-            def deep_compare_metadata(current_value, new_value):
-                """Compare two metadata values with normalization"""
-                normalized_current = normalize_for_comparison(current_value)
-                normalized_new = normalize_for_comparison(new_value)
-
-                if normalized_current is None and normalized_new is None:
-                    return True
-                if normalized_current is None or normalized_new is None:
-                    return False
-
-                if isinstance(normalized_current, dict) and isinstance(
-                    normalized_new, dict
-                ):
-                    try:
-                        current_json = json.dumps(
-                            normalized_current,
-                            sort_keys=True,
-                            separators=(",", ":"),
-                        )
-                        new_json = json.dumps(
-                            normalized_new,
-                            sort_keys=True,
-                            separators=(",", ":"),
-                        )
-                        return current_json == new_json
-                    except (TypeError, ValueError):
-                        if set(normalized_current.keys()) != set(
-                            normalized_new.keys()
-                        ):
-                            return False
-                        for key in normalized_current.keys():
-                            if not deep_compare_metadata(
-                                normalized_current[key], normalized_new[key]
-                            ):
-                                return False
-                        return True
-
-                if isinstance(normalized_current, list) and isinstance(
-                    normalized_new, list
-                ):
-                    current_set = set()
-                    new_set = set()
-
-                    for item in normalized_current:
-                        try:
-                            item_str = (
-                                json.dumps(item, sort_keys=True)
-                                if isinstance(item, dict)
-                                else str(item)
-                            )
-                            current_set.add(item_str)
-                        except (TypeError, ValueError):
-                            current_set.add(str(item))
-
-                    for item in normalized_new:
-                        try:
-                            item_str = (
-                                json.dumps(item, sort_keys=True)
-                                if isinstance(item, dict)
-                                else str(item)
-                            )
-                            new_set.add(item_str)
-                        except (TypeError, ValueError):
-                            new_set.add(str(item))
-
-                    return current_set == new_set
-
-                try:
-                    current_json = json.dumps(
-                        normalized_current,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
-                    new_json = json.dumps(
-                        normalized_new, sort_keys=True, separators=(",", ":")
-                    )
-                    return current_json == new_json
-                except (TypeError, ValueError):
-                    return normalized_current == normalized_new
-
             # Check for metadata changes
             metadata_changed = False
             changes_detected = []
@@ -732,7 +588,9 @@ def update_records_in_RDM(source_ids_to_update):
                 current_value = current_metadata.get(field)
                 new_value = new_metadata.get(field)
 
-                if not deep_compare_metadata(current_value, new_value):
+                if not rdm_upload_utils.deep_compare_metadata(
+                    current_value, new_value
+                ):
                     metadata_changed = True
                     changes_detected.append(field)
 
@@ -743,99 +601,18 @@ def update_records_in_RDM(source_ids_to_update):
                 f"Metadata changes detected for source_id {source_id} in fields: {', '.join(changes_detected)}"
             )
 
-            # Create a new version/draft for the record
-            r = requests.post(
-                f"{RDM_API_URL}/records/{record_id}/versions", headers=h
-            )
-            if r.status_code != 201:
-                print(
-                    f"Failed to create new version for record {record_id} (code: {r.status_code})"
-                )
-                failed_uploads.append(source_id)
-                continue
-
             new_version_data = r.json()
             new_record_id = new_version_data["id"]
 
-            # Update the draft with new metadata
-            r = requests.put(
-                f"{RDM_API_URL}/records/{new_record_id}/draft",
-                data=json.dumps(new_metadata_structure),
-                headers=h,
+            fails = rdm_upload_utils.upload_to_rdm(
+                metadata=new_metadata_structure,
+                elaute_id=source_id,
+                file_paths=[file_path],
+                RDM_API_TOKEN=RDM_API_TOKEN,
+                record_id=new_record_id,
+                draft_one=draft_one,
             )
-            if r.status_code != 200:
-                print(
-                    f"Failed to update draft {new_record_id} (code: {r.status_code})"
-                )
-                failed_uploads.append(source_id)
-                continue
-
-            # Update files - delete existing and upload new ones
-            r = requests.delete(
-                f"{RDM_API_URL}/records/{new_record_id}/draft/files", headers=h
-            )
-
-            # Upload files
-            file_entries = []
-            for file_path in file_path:
-                file_entries.append({"key": os.path.basename(file_path)})
-
-            # Initialize files
-            data = json.dumps(file_entries)
-            r = requests.post(
-                f"{RDM_API_URL}/records/{new_record_id}/draft/files",
-                data=data,
-                headers=h,
-            )
-            if r.status_code != 201:
-                print(
-                    f"Failed to initialize files for record {new_record_id} (code: {r.status_code})"
-                )
-                failed_uploads.append(source_id)
-                continue
-
-            file_responses = r.json()["entries"]
-
-            # Upload each file
-            for i, file_path in enumerate(file_path):
-                file_links = file_responses[i]["links"]
-
-                # Upload file content
-                with open(file_path, "rb") as fp:
-                    r = requests.put(file_links["content"], data=fp, headers=fh)
-                if r.status_code != 200:
-                    failed_uploads.append(source_id)
-                    continue
-
-                # Commit the file
-                r = requests.post(file_links["commit"], headers=h)
-                if r.status_code != 200:
-                    failed_uploads.append(source_id)
-                    continue
-
-            # Add to E-LAUTE community
-            if ELAUTE_COMMUNITY_ID:
-                r = requests.put(
-                    f"{RDM_API_URL}/records/{new_record_id}/draft/review",
-                    headers=h,
-                    data=json.dumps(
-                        {
-                            "receiver": {"community": ELAUTE_COMMUNITY_ID},
-                            "type": "community-submission",
-                        }
-                    ),
-                )
-
-            # Publish the updated record
-            r = requests.post(
-                f"{RDM_API_URL}/records/{new_record_id}/draft/actions/submit-review",
-                headers=h,
-            )
-            if not r.status_code == 202:
-                print(
-                    f"Failed to submit review for record {record_id} (code: {r.status_code})"
-                )
-                failed_uploads.append(source_id)
+            failed_uploads.extend(fails)
 
         except Exception as e:
             print(f"Error updating record for source_id {source_id}: {str(e)}")

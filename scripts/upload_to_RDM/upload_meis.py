@@ -267,8 +267,6 @@ def get_work_ids_from_files():
     """
     work_ids = set()
 
-    print(FILES_PATH)
-
     for root, dirs, files in os.walk(FILES_PATH):
         for file in files:
             if file.endswith(".mei"):
@@ -365,7 +363,6 @@ def combine_metadata_for_work_id(work_id, file_paths):
             ):
                 if not pd.isna(value) and value != "":
                     combined_metadata[key] = value
-                    print(f"    Merged field '{key}': {value}")
 
     # Special handling for publication_date: choose the latest/most recent date
     publication_dates = []
@@ -376,10 +373,8 @@ def combine_metadata_for_work_id(work_id, file_paths):
                 # Try to parse the date to ensure it's valid and for comparison
                 parsed_date = datetime.strptime(pub_date, "%Y-%m-%d")
                 publication_dates.append((pub_date, parsed_date))
-                print(f"    Found publication date: {pub_date}")
             except ValueError:
                 # If date parsing fails, skip this date
-                print(f"    Skipping invalid date format: {pub_date}")
                 continue
 
     if publication_dates:
@@ -635,7 +630,6 @@ def update_records_in_RDM(work_ids_to_update, draft_one=False):
         # Check if work_id exists in mapping
         mapping_row = existing_records[existing_records["elaute_id"] == work_id]
         if mapping_row.empty:
-            print(f"Work ID {work_id} not found in existing records. Skipping.")
             continue
 
         record_id = mapping_row.iloc[0]["record_id"]
@@ -710,132 +704,25 @@ def update_records_in_RDM(work_ids_to_update, draft_one=False):
             )
 
             # --- UPLOAD ---
+            new_version_data = r.json()
+            new_record_id = new_version_data["id"]
 
-            fails = rdm_upload_utils.upload_v2(
-                metadata=new_metadata,
+            fails = rdm_upload_utils.upload_to_rdm(
+                metadata=new_metadata_structure,
                 elaute_id=work_id,
                 file_paths=file_paths,
                 RDM_API_TOKEN=RDM_API_TOKEN,
                 RDM_API_URL=RDM_API_URL,
                 ELAUTE_COMMUNITY_ID=ELAUTE_COMMUNITY_ID,
+                record_id=new_record_id,
                 draft_one=draft_one,
             )
             failed_updates.extend(fails)
 
         except Exception as e:
-            print(f"Error uploading files for work_id {work_id}: {e}")
-
-        #     # Create a new version/draft for the record
-        #     r = requests.post(f"{api_url}/{record_id}/versions", headers=h)
-        #     if r.status_code != 201:
-        #         print(
-        #             f"Failed to create new version for record {record_id} (code: {r.status_code})"
-        #         )
-        #         failed_updates.append(work_id)
-        #         continue
-
-        #     new_version_data = r.json()
-        #     new_record_id = new_version_data["id"]
-
-        #     # Update the draft with new metadata
-        #     r = requests.put(
-        #         f"{api_url}/{new_record_id}/draft",
-        #         data=json.dumps(new_metadata_structure),
-        #         headers=h,
-        #     )
-        #     if r.status_code != 200:
-        #         print(
-        #             f"Failed to update draft {new_record_id} (code: {r.status_code})"
-        #         )
-        #         failed_updates.append(work_id)
-        #         continue
-
-        #     # Update files - delete existing and upload new ones
-        #     r = requests.delete(
-        #         f"{api_url}/{new_record_id}/draft/files", headers=h
-        #     )
-
-        #     # Upload files
-        #     file_entries = []
-        #     for file_path in file_paths:
-        #         file_entries.append({"key": os.path.basename(file_path)})
-
-        #     # Initialize files
-        #     data = json.dumps(file_entries)
-        #     r = requests.post(
-        #         f"{api_url}/{new_record_id}/draft/files",
-        #         data=data,
-        #         headers=h,
-        #     )
-        #     if r.status_code != 201:
-        #         print(
-        #             f"Failed to initialize files for record {new_record_id} (code: {r.status_code})"
-        #         )
-        #         failed_updates.append(work_id)
-        #         continue
-
-        #     file_responses = r.json()["entries"]
-
-        #     # Upload each file
-        #     for i, file_path in enumerate(file_paths):
-        #         file_links = file_responses[i]["links"]
-
-        #         # Upload file content
-        #         with open(file_path, "rb") as fp:
-        #             r = requests.put(file_links["content"], data=fp, headers=fh)
-        #         if r.status_code != 200:
-        #             continue
-
-        #         # Commit the file
-        #         r = requests.post(file_links["commit"], headers=h)
-        #         if r.status_code != 200:
-        #             continue
-
-        #     # Add to E-LAUTE community
-        #     if ELAUTE_COMMUNITY_ID:
-        #         r = requests.put(
-        #             f"{api_url}/{new_record_id}/draft/review",
-        #             headers=h,
-        #             data=json.dumps(
-        #                 {
-        #                     "receiver": {"community": ELAUTE_COMMUNITY_ID},
-        #                     "type": "community-submission",
-        #                 }
-        #             ),
-        #         )
-
-        #     # Submit the review for the record draft
-        #     r = requests.post(
-        #         f"{api_url}/{record_id}/draft/actions/submit-review",
-        #         headers=h,
-        #     )
-        #     if not r.status_code == 202:
-        #         print(
-        #             f"Failed to submit review for record {record_id} (code: {r.status_code})"
-        #         )
-        #         failed_updates.append(work_id)
-
-        #     # Update mapping with new record ID and timestamp
-        #     updated_records.append(
-        #         {
-        #             "work_id": work_id,
-        #             "record_id": new_record_id,
-        #             "file_count": len(file_paths),
-        #             "created": mapping_row.iloc[0][
-        #                 "created"
-        #             ],  # Keep original timestamp
-        #             "updated": current_timestamp,
-        #         }
-        #     )
-
-        #     print(
-        #         f"Successfully updated record for work_id {work_id}: {new_record_id}"
-        #     )
-
-        # except Exception as e:
-        #     print(f"Error updating record for work_id {work_id}: {str(e)}")
-        #     failed_updates.append(work_id)
-        #     continue
+            print(f"Error updating record for work_id {work_id}: {str(e)}")
+            failed_updates.append(work_id)
+            continue
 
     # Summary
     print("\nUPDATE SUMMARY:")
@@ -872,10 +759,6 @@ def process_elaute_ids_for_update_or_create():
     existing_records = rdm_upload_utils.get_records_from_RDM(
         RDM_API_TOKEN, RDM_API_URL, ELAUTE_COMMUNITY_ID
     )
-
-    print(type(existing_records))
-    print(existing_records)
-
     existing_work_ids = set(existing_records["elaute_id"].tolist())
 
     # Get work_ids from current files
